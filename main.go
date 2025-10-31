@@ -1,14 +1,22 @@
+// @path main.go
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,6 +132,7 @@ func newModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 	dirList.SetFilteringEnabled(false)
 
 	items := []list.Item{
+		plugin{"orchestrator", "Split into subtasks and execute sequentially"},
 		plugin{"architect", "High-level design and refactoring"},
 		plugin{"coder", "Feature implementation and tests"},
 		plugin{"reviewer", "Code review and optimization"},
@@ -137,7 +146,7 @@ func newModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 	l.SetFilteringEnabled(false)
 
 	ta := textarea.New()
-	ta.Placeholder = "Describe your task or goal..."
+	ta.Placeholder = "Describe your task or goal... (tip: start with `split:` to auto-orchestrate)"
 	ta.SetHeight(7)
 
 	st := styles{
@@ -202,12 +211,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modeUTCP {
 				m.mode = modeList
 				m.list.Title = "Agents"
-				m.list.SetItems([]list.Item{
-					plugin{"architect", "High-level design and refactoring"},
-					plugin{"coder", "Feature implementation and tests"},
-					plugin{"reviewer", "Code review and optimization"},
-					plugin{"utcp", "Explore connected UTCP tools"},
-				})
+				m.list.SetItems(defaultAgents())
 				return m, nil
 			}
 			if m.mode == modeResult {
@@ -219,12 +223,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				default:
 					m.mode = modeList
 					m.list.Title = "Agents"
-					m.list.SetItems([]list.Item{
-						plugin{"architect", "High-level design and refactoring"},
-						plugin{"coder", "Feature implementation and tests"},
-						plugin{"reviewer", "Code review and optimization"},
-						plugin{"utcp", "Explore connected UTCP tools"},
-					})
+					m.list.SetItems(defaultAgents())
 				}
 				m.textarea.Reset()
 				return m, nil
@@ -232,12 +231,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modePrompt {
 				m.mode = modeList
 				m.list.Title = "Agents"
-				m.list.SetItems([]list.Item{
-					plugin{"architect", "High-level design and refactoring"},
-					plugin{"coder", "Feature implementation and tests"},
-					plugin{"reviewer", "Code review and optimization"},
-					plugin{"utcp", "Explore connected UTCP tools"},
-				})
+				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
 				return m, nil
 			}
@@ -246,12 +240,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modePrompt {
 				m.mode = modeList
 				m.list.Title = "Agents"
-				m.list.SetItems([]list.Item{
-					plugin{"architect", "High-level design and refactoring"},
-					plugin{"coder", "Feature implementation and tests"},
-					plugin{"reviewer", "Code review and optimization"},
-					plugin{"utcp", "Explore connected UTCP tools"},
-				})
+				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
 				return m, nil
 			}
@@ -262,12 +251,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modeResult {
 				m.mode = modeList
 				m.list.Title = "Agents"
-				m.list.SetItems([]list.Item{
-					plugin{"architect", "High-level design and refactoring"},
-					plugin{"coder", "Feature implementation and tests"},
-					plugin{"reviewer", "Code review and optimization"},
-					plugin{"utcp", "Explore connected UTCP tools"},
-				})
+				m.list.SetItems(defaultAgents())
 				return m, nil
 			}
 			return m, nil
@@ -358,16 +342,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmd, thinkingTick())
 
 			case modePrompt:
-				prompt := strings.TrimSpace(m.textarea.Value())
-				if prompt == "" {
+				raw := strings.TrimSpace(m.textarea.Value())
+				if raw == "" {
 					return m, nil
 				}
+
+				// Orchestration shortcut: `split: ...`
+				forceSplit := strings.HasPrefix(strings.ToLower(raw), "split:")
+				prompt := strings.TrimSpace(strings.TrimPrefix(raw, "split:"))
 
 				m.prevMode = m.mode
 				m.mode = modeThinking
 				m.output = ""
 				m.thinking = "thinking"
 
+				// Inline UTCP pass-through
 				if strings.HasPrefix(prompt, "@utcp ") {
 					cmd := func() tea.Msg {
 						res, err := m.runUTCPInline(prompt)
@@ -380,31 +369,51 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(cmd, thinkingTick())
 				}
 
+				// Orchestrator pipeline (selected or forced via split:)
+				if m.selected.name == "orchestrator" || forceSplit {
+					cmd := func() tea.Msg {
+						out, err := m.runOrchestrator(prompt)
+						if err != nil {
+							return generateMsg{"", err}
+						}
+						return generateMsg{out, nil}
+					}
+					return m, tea.Batch(cmd, thinkingTick())
+				}
+
+				// Single-shot generate on current agent (architect/coder/reviewer)
 				const (
 					maxFiles      = 300
 					maxTotalBytes = int64(1_200_000)
 					perFileLimit  = int64(80_000)
 				)
-				ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit)
+				// Detect language dynamically from the current prompt or goal
+				lang := detectPromptLanguage(prompt)
+
+				ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
 				m.contextFiles, m.contextBytes = nFiles, nBytes
-				// @package main
+				attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
 				fullPrompt := strings.Builder{}
 				fullPrompt.WriteString("You are Vibe, the coding agent inside a TUI. Use the CODEBASE SNAPSHOT as ground truth. Follow the OUTPUT CONTRACT from your system prompt: start with a short Plan, then emit full files as fenced code blocks (one file per fence), then optional Next steps. Avoid diffs and partials.\n\n")
-
-				// 👇 NEW: tell the model the exact workspace path + rule
 				fullPrompt.WriteString("### [WORKSPACE ROOT]\n")
 				fullPrompt.WriteString(m.working + "\n")
 				fullPrompt.WriteString("- Save entrypoints at this exact path by default (e.g., ./main.go).\n")
 				fullPrompt.WriteString("- To override placement for any file, add a top-of-file comment `@path <relative/from-root>`.\n\n")
-
 				fullPrompt.WriteString(ctxBlock)
 				fullPrompt.WriteString("\n\n---\n### Task\n")
 				fullPrompt.WriteString(prompt)
 
 				cmd := func() tea.Msg {
-					res, err := m.agent.Generate(m.ctx, "1", fullPrompt.String())
+
+					res, err := m.agent.GenerateWithFiles(m.ctx, "1", fullPrompt.String(), attachments)
 					if err != nil {
-						return generateMsg{"", err}
+						fallback, ferr := m.agent.Generate(m.ctx, "1", fullPrompt.String())
+						if ferr != nil {
+							return generateMsg{"", fmt.Errorf("GenerateWithFiles failed: %v; fallback Generate failed: %v", err, ferr)}
+						}
+						m.saveCodeBlocks(fallback)
+						return generateMsg{fallback, nil}
 					}
 					m.saveCodeBlocks(res)
 					return generateMsg{res, nil}
@@ -420,12 +429,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				default:
 					m.mode = modeList
 					m.list.Title = "Agents"
-					m.list.SetItems([]list.Item{
-						plugin{"architect", "High-level design and refactoring"},
-						plugin{"coder", "Feature implementation and tests"},
-						plugin{"reviewer", "Code review and optimization"},
-						plugin{"utcp", "Explore connected UTCP tools"},
-					})
+					m.list.SetItems(defaultAgents())
 				}
 				return m, nil
 			}
@@ -466,9 +470,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func defaultAgents() []list.Item {
+	return []list.Item{
+		plugin{"orchestrator", "Split into subtasks and execute sequentially"},
+		plugin{"architect", "High-level design and refactoring"},
+		plugin{"coder", "Feature implementation and tests"},
+		plugin{"reviewer", "Code review and optimization"},
+		plugin{"utcp", "Explore connected UTCP tools"},
+	}
+}
+
 // @package main
 func extractExplicitPath(code string) string {
-	// Matches: @path some/dir/file.go  OR  // path: some/dir/file.go  OR  # path: some/dir/file.py
 	patterns := []string{
 		`(?m)@path\s+([^\s]+)`,
 		`(?m)//\s*path:\s*([^\s]+)`,
@@ -690,6 +703,441 @@ type fileMeta struct {
 	Name string `json:"name"`
 }
 
+// @package main
+func (m *model) saveCodeBlocks(s string) {
+	m.output += "\n---\n"
+	matches := fenceRe.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		m.output += m.style.subtle.Render("No code blocks detected.\n")
+		return
+	}
+
+	manifest := make(map[string][]fileMeta)
+
+	for idx, mth := range matches {
+		lang := strings.ToLower(strings.TrimSpace(mth[1]))
+		code := strings.TrimSpace(mth[2])
+		if lang == "" {
+			lang = guessLanguageFromCode(code)
+		}
+		if lang == "" {
+			lang = "txt"
+		}
+
+		// 1) Respect explicit @path if provided
+		explicit := extractExplicitPath(code)
+		var filename string
+		var targetDir string
+		pkgName := ""
+
+		if explicit != "" {
+			abs := filepath.Join(m.working, explicit)
+			_ = os.MkdirAll(filepath.Dir(abs), 0o755)
+			filename = abs
+			targetDir = filepath.Dir(abs)
+		} else {
+			// 2) Entrypoint safeguard for Go: keep at root
+			if lang == "go" && (strings.Contains(code, "package main") || strings.Contains(code, "func main(")) {
+				targetDir = m.working
+			} else {
+				targetDir, pkgName = m.detectPackageDirectory(lang, code)
+			}
+			_ = os.MkdirAll(targetDir, 0o755)
+			filename = filepath.Join(targetDir, m.guessFilename(lang, code, idx))
+		}
+
+		if err := os.WriteFile(filename, []byte(code+"\n"), 0o644); err != nil {
+			m.output += m.style.error.Render(fmt.Sprintf("❌ failed to save %s: %v\n", filename, err))
+			continue
+		}
+
+		key := lang
+		if pkgName != "" {
+			key = pkgName
+		}
+		manifest[key] = append(manifest[key], fileMeta{Name: filepath.Base(filename), Path: filename})
+		m.output += m.style.success.Render(fmt.Sprintf("💾 saved %s\n", filename))
+	}
+
+	for _, files := range manifest {
+		lang := guessPrimaryLang(files)
+		m.addImports(lang, files)
+	}
+	if err := NormalizeImports(m.working); err != nil {
+		m.output += m.style.subtle.Render(
+			fmt.Sprintf("⚠ import normalize: %v\n", err),
+		)
+	}
+}
+
+// Universal package/module detector for ANY programming language
+func (m *model) detectPackageDirectory(lang, code string) (string, string) {
+	// Try universal patterns first
+	if pkg := extractUniversalPackage(code); pkg != "" {
+		pkgDir := filepath.Join(m.working, pkg)
+		return pkgDir, pkg
+	}
+
+	// Language-specific detection
+	switch lang {
+	case "go":
+		if pkg := extractGoPackage(code); pkg != "" && pkg != "main" {
+			return filepath.Join(m.working, pkg), pkg
+		}
+		return m.working, ""
+
+	case "python", "py":
+		if pkg := extractPythonPackage(code); pkg != "" {
+			return filepath.Join(m.working, pkg), pkg
+		}
+		return filepath.Join(m.working, lang), ""
+
+	case "js", "javascript", "ts", "typescript":
+		if pkg := extractJSPackage(code); pkg != "" {
+			return filepath.Join(m.working, pkg), pkg
+		}
+		return filepath.Join(m.working, lang), ""
+
+	case "rs", "rust":
+		if mod := extractRustModule(code); mod != "" {
+			return filepath.Join(m.working, "src", mod), mod
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "java":
+		if pkg := extractJavaPackage(code); pkg != "" {
+			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, "src", pkgPath), pkg
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "cs", "csharp", "c#":
+		if ns := extractCSharpNamespace(code); ns != "" {
+			nsPath := strings.ReplaceAll(ns, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, nsPath), ns
+		}
+		return filepath.Join(m.working, lang), ""
+
+	case "cpp", "c++", "cc", "cxx":
+		if ns := extractCppNamespace(code); ns != "" {
+			return filepath.Join(m.working, "include", ns), ns
+		}
+		if strings.Contains(code, "#ifndef") || strings.Contains(code, "#pragma once") {
+			return filepath.Join(m.working, "include"), ""
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "c":
+		if strings.Contains(code, "#ifndef") || strings.Contains(code, "#pragma once") {
+			return filepath.Join(m.working, "include"), ""
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "rb", "ruby":
+		if mod := extractRubyModule(code); mod != "" {
+			return filepath.Join(m.working, "lib", strings.ToLower(mod)), mod
+		}
+		return filepath.Join(m.working, "lib"), ""
+
+	case "php":
+		if ns := extractPHPNamespace(code); ns != "" {
+			nsPath := strings.ReplaceAll(ns, "\\", string(os.PathSeparator))
+			return filepath.Join(m.working, "src", nsPath), ns
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "kt", "kotlin":
+		if pkg := extractKotlinPackage(code); pkg != "" {
+			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, "src", pkgPath), pkg
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "swift":
+		if mod := extractSwiftModule(code); mod != "" {
+			return filepath.Join(m.working, "Sources", mod), mod
+		}
+		return filepath.Join(m.working, "Sources"), ""
+
+	case "dart":
+		if pkg := extractDartPackage(code); pkg != "" {
+			return filepath.Join(m.working, "lib", pkg), pkg
+		}
+		return filepath.Join(m.working, "lib"), ""
+
+	case "lua":
+		if mod := extractLuaModule(code); mod != "" {
+			return filepath.Join(m.working, mod), mod
+		}
+		return m.working, ""
+
+	case "elixir", "ex":
+		if mod := extractElixirModule(code); mod != "" {
+			modPath := strings.ReplaceAll(mod, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, "lib", strings.ToLower(modPath)), mod
+		}
+		return filepath.Join(m.working, "lib"), ""
+
+	case "scala":
+		if pkg := extractScalaPackage(code); pkg != "" {
+			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, "src", "main", "scala", pkgPath), pkg
+		}
+		return filepath.Join(m.working, "src", "main", "scala"), ""
+
+	case "clojure", "clj":
+		if ns := extractClojureNamespace(code); ns != "" {
+			nsPath := strings.ReplaceAll(ns, ".", string(os.PathSeparator))
+			nsPath = strings.ReplaceAll(nsPath, "-", "_")
+			return filepath.Join(m.working, "src", nsPath), ns
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "haskell", "hs":
+		if mod := extractHaskellModule(code); mod != "" {
+			modPath := strings.ReplaceAll(mod, ".", string(os.PathSeparator))
+			return filepath.Join(m.working, "src", modPath), mod
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	case "r":
+		if pkg := extractRPackage(code); pkg != "" {
+			return filepath.Join(m.working, "R", pkg), pkg
+		}
+		return filepath.Join(m.working, "R"), ""
+
+	case "julia", "jl":
+		if mod := extractJuliaModule(code); mod != "" {
+			return filepath.Join(m.working, "src", mod), mod
+		}
+		return filepath.Join(m.working, "src"), ""
+
+	default:
+		// Generic fallback: try to detect any module-like structure
+		return filepath.Join(m.working, lang), ""
+	}
+}
+
+// Universal package detector - works across multiple languages
+func extractUniversalPackage(code string) string {
+	patterns := []string{
+		`@package\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`,
+		`@module\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`,
+		`#\s*package:\s*([a-zA-Z_][a-zA-Z0-9_.-]*)`,
+		`//\s*package:\s*([a-zA-Z_][a-zA-Z0-9_.-]*)`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if match := re.FindStringSubmatch(code); len(match) > 1 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+// Language-specific extractors
+func extractGoPackage(code string) string {
+	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractPythonPackage(code string) string {
+	if strings.Contains(code, "__all__") || strings.Contains(code, "__init__") {
+		if strings.Contains(code, "class ") {
+			if name := extractAfter(code, "class "); name != "" {
+				return strings.ToLower(name)
+			}
+		}
+	}
+	return ""
+}
+
+func extractJSPackage(code string) string {
+	re := regexp.MustCompile(`[@/]\s*(?:package|module)\s+([a-zA-Z_][a-zA-Z0-9_-]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractRustModule(code string) string {
+	re := regexp.MustCompile(`(?m)^(?:pub\s+)?mod\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractJavaPackage(code string) string {
+	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractCSharpNamespace(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractCppNamespace(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractRubyModule(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*module\s+([A-Z][a-zA-Z0-9_]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractPHPNamespace(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_\\]*)\s*;`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractKotlinPackage(code string) string {
+	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractSwiftModule(code string) string {
+	if strings.Contains(code, "public struct") || strings.Contains(code, "public class") {
+		re := regexp.MustCompile(`public\s+(?:struct|class)\s+([A-Z][a-zA-Z0-9_]*)`)
+		if match := re.FindStringSubmatch(code); len(match) > 1 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func extractDartPackage(code string) string {
+	re := regexp.MustCompile(`(?m)^library\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractLuaModule(code string) string {
+	re := regexp.MustCompile(`(?m)^local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{\}`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		if strings.Contains(code, "return "+match[1]) {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func extractElixirModule(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*defmodule\s+([A-Z][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractScalaPackage(code string) string {
+	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractClojureNamespace(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*\(\s*ns\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractHaskellModule(code string) string {
+	re := regexp.MustCompile(`(?m)^module\s+([A-Z][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractRPackage(code string) string {
+	re := regexp.MustCompile(`#'\s*@package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractJuliaModule(code string) string {
+	re := regexp.MustCompile(`(?m)^\s*module\s+([A-Z][a-zA-Z0-9_]*)`)
+	if match := re.FindStringSubmatch(code); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func guessPrimaryLang(files []fileMeta) string {
+	if len(files) == 0 {
+		return "txt"
+	}
+	ext := filepath.Ext(files[0].Name)
+	return strings.TrimPrefix(ext, ".")
+}
+
+// Update dirForLanguage for universal language support
+func (m *model) dirForLanguage(lang string) string {
+	switch lang {
+	case "go":
+		return m.working
+	case "rs", "rust":
+		return filepath.Join(m.working, "src")
+	case "java", "kt", "kotlin", "scala":
+		return filepath.Join(m.working, "src")
+	case "rb", "ruby":
+		return filepath.Join(m.working, "lib")
+	case "php":
+		return filepath.Join(m.working, "src")
+	case "swift":
+		return filepath.Join(m.working, "Sources")
+	case "dart":
+		return filepath.Join(m.working, "lib")
+	case "elixir", "ex":
+		return filepath.Join(m.working, "lib")
+	case "clojure", "clj":
+		return filepath.Join(m.working, "src")
+	case "haskell", "hs":
+		return filepath.Join(m.working, "src")
+	case "r":
+		return filepath.Join(m.working, "R")
+	case "julia", "jl":
+		return filepath.Join(m.working, "src")
+	case "c", "cpp", "c++", "cc", "cxx":
+		return filepath.Join(m.working, "src")
+	default:
+		return filepath.Join(m.working, lang)
+	}
+}
+
 func (m *model) guessFilename(lang, code string, index int) string {
 	base := "snippet"
 	switch lang {
@@ -886,83 +1334,6 @@ type fileEntry struct {
 	Size int64
 }
 
-func buildCodebaseContext(root string, maxFiles int, maxTotalBytes, perFileLimit int64) (string, int, int64) {
-	var entries []fileEntry
-	var total int64
-
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if isIgnoredDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !allowedFile(path) {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, path)
-		entries = append(entries, fileEntry{Rel: rel, Abs: path, Size: info.Size()})
-		return nil
-	})
-
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Rel < entries[j].Rel })
-
-	var included []fileEntry
-	for _, e := range entries {
-		if len(included) >= maxFiles {
-			break
-		}
-		if total >= maxTotalBytes {
-			break
-		}
-		included = append(included, e)
-		capAdd := e.Size
-		if capAdd > perFileLimit {
-			capAdd = perFileLimit
-		}
-		total += capAdd
-	}
-
-	tree := buildTree(included)
-
-	var filesSection strings.Builder
-	for _, f := range included {
-		content, _ := os.ReadFile(f.Abs)
-		if int64(len(content)) > perFileLimit {
-			content = content[:perFileLimit]
-		}
-		lang := fenceLangFromExt(filepath.Ext(f.Rel))
-		filesSection.WriteString("\n")
-		filesSection.WriteString("### ")
-		filesSection.WriteString(f.Rel)
-		filesSection.WriteString("\n```")
-		filesSection.WriteString(lang)
-		filesSection.WriteString("\n")
-		filesSection.Write(content)
-		filesSection.WriteString("\n```\n")
-	}
-
-	var out strings.Builder
-	out.WriteString("## CODEBASE SNAPSHOT\n")
-	out.WriteString(fmt.Sprintf("- Root: `%s`\n", root))
-	out.WriteString(fmt.Sprintf("- Files included: %d (limit %d)\n", len(included), maxFiles))
-	out.WriteString(fmt.Sprintf("- Size included: %s (limit %s)\n", humanSize(total), humanSize(maxTotalBytes)))
-	out.WriteString("\n### Tree\n")
-	out.WriteString("```\n")
-	out.WriteString(tree)
-	out.WriteString("\n```\n")
-	out.WriteString(filesSection.String())
-
-	return out.String(), len(included), total
-}
-
 func isIgnoredDir(name string) bool {
 	ignored := map[string]struct{}{
 		".git": {}, "node_modules": {}, "dist": {}, "build": {}, "out": {}, "target": {}, "vendor": {},
@@ -975,7 +1346,7 @@ func isIgnoredDir(name string) bool {
 func allowedFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	allow := map[string]struct{}{
-		".go": {}, /*".mod": {}, ".sum": {},*/ // intentionally excluded to ignore modules
+		".go": {},
 		".md": {}, ".yaml": {}, ".yml": {}, ".json": {},
 		".py": {}, ".js": {}, ".ts": {}, ".tsx": {}, ".jsx": {}, ".rs": {}, ".rb": {},
 		".java": {}, ".c": {}, ".cpp": {}, ".h": {}, ".sh": {}, ".toml": {}, ".ini": {},
@@ -1094,6 +1465,162 @@ func humanSize(n int64) string {
 	}
 }
 
+func mimeForPath(rel string) string {
+	ext := strings.ToLower(filepath.Ext(rel))
+	switch ext {
+	case ".md":
+		return "text/markdown"
+	case ".go", ".py", ".rs", ".rb", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".sh", ".txt":
+		return "text/plain"
+	case ".js":
+		return "application/javascript"
+	case ".ts", ".tsx":
+		return "application/typescript"
+	case ".jsx":
+		return "text/jsx"
+	case ".json":
+		return "application/json"
+	case ".yaml", ".yml":
+		return "application/yaml"
+	case ".toml":
+		return "application/toml"
+	case ".ini", ".cfg":
+		return "text/plain"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ORCHESTRATOR: split → iterate subtasks → save files
+// -----------------------------------------------------------------------------
+
+type subtask struct {
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+}
+type plan struct {
+	Tasks []subtask `json:"tasks"`
+}
+
+func (m *model) runOrchestrator(userGoal string) (string, error) {
+	var log strings.Builder
+	fmt.Fprintf(&log, "🧭 Orchestrator: planning for goal:\n> %s\n\n", userGoal)
+
+	// 1) Build current context for the planner
+	const (
+		maxFiles      = 300
+		maxTotalBytes = int64(1_200_000)
+		perFileLimit  = int64(80_000)
+	)
+
+	// Detect language dynamically from the current prompt or goal
+	plannerPrompt := strings.Builder{}
+	plannerPrompt.WriteString("You are a senior software planner. Split the user's GOAL into 3–8 ordered subtasks.\n")
+	plannerPrompt.WriteString("Return JSON ONLY in this exact structure:\n")
+	plannerPrompt.WriteString("{\"tasks\":[{\"title\":\"...\",\"detail\":\"...\"}]}\n")
+	plannerPrompt.WriteString("Keep titles concise; put concrete instructions in detail. Do not include code.\n\n")
+	plannerPrompt.WriteString("### [WORKSPACE ROOT]\n")
+	plannerPrompt.WriteString(m.working + "\n\n")
+	lang := detectPromptLanguage(plannerPrompt.String())
+
+	ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	m.contextFiles, m.contextBytes = nFiles, nBytes
+	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	plannerPrompt.WriteString(ctxBlock)
+	plannerPrompt.WriteString("\n\n---\nGOAL:\n")
+	plannerPrompt.WriteString(userGoal)
+	rawPlan, err := m.agent.GenerateWithFiles(m.ctx, "1", plannerPrompt.String(), attachments)
+	if err != nil {
+		// fallback to plain generate
+		rawPlan, err = m.agent.Generate(m.ctx, "1", plannerPrompt.String())
+		if err != nil {
+			return "", fmt.Errorf("plan generation failed: %w", err)
+		}
+	}
+	p, perr := parsePlan(rawPlan)
+	if perr != nil || len(p.Tasks) == 0 {
+		// Fallback: single task = original goal
+		p = plan{Tasks: []subtask{{Title: "Apply requested changes", Detail: userGoal}}}
+	}
+
+	fmt.Fprintf(&log, "📝 Plan (%d tasks):\n", len(p.Tasks))
+	for i, t := range p.Tasks {
+		fmt.Fprintf(&log, "  %d) %s — %s\n", i+1, t.Title, trim(t.Detail, 140))
+	}
+	fmt.Fprintln(&log)
+
+	// 3) Execute each subtask, rebuilding context each time
+	for i, t := range p.Tasks {
+		step := i + 1
+		fmt.Fprintf(&log, "➡️  Task %d/%d: %s\n", step, len(p.Tasks), t.Title)
+
+		// Refresh context & attachments to include previous steps' changes
+		ctxBlock, nFiles, nBytes = buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+		m.contextFiles, m.contextBytes = nFiles, nBytes
+		attachments = collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
+		sub := strings.Builder{}
+		sub.WriteString("You are Vibe, the coding agent inside a TUI. Execute the current SUBTASK against the codebase.\n")
+		sub.WriteString("Follow the OUTPUT CONTRACT: short Plan → full files in fenced code blocks → (optional) Next steps.\n")
+		sub.WriteString("Do NOT emit diffs or partials. Use @path to place new/renamed files precisely. Avoid creating language folders.\n")
+		sub.WriteString("\n### [WORKSPACE ROOT]\n")
+		sub.WriteString(m.working + "\n\n")
+		sub.WriteString(ctxBlock)
+		sub.WriteString("\n---\nORIGINAL GOAL:\n")
+		sub.WriteString(userGoal)
+		sub.WriteString("\n---\nSUBTASK:\n")
+		sub.WriteString(fmt.Sprintf("%s — %s\n", t.Title, t.Detail))
+
+		resp, err := m.agent.GenerateWithFiles(m.ctx, "1", sub.String(), attachments)
+		if err != nil {
+			// graceful fallback
+			resp, err = m.agent.Generate(m.ctx, "1", sub.String())
+			if err != nil {
+				fmt.Fprintf(&log, "   ❌ generation failed: %v\n", err)
+				continue
+			}
+		}
+		m.saveCodeBlocks(resp)
+		fmt.Fprintf(&log, "   ✅ saved files for task %d\n\n", step)
+	}
+
+	fmt.Fprintln(&log, "🎉 Orchestration complete.")
+	return log.String(), nil
+}
+
+func parsePlan(s string) (plan, error) {
+	// 1) Prefer ```json blocks
+	reFence := regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
+	if m := reFence.FindStringSubmatch(s); len(m) > 1 {
+		var p plan
+		if json.Unmarshal([]byte(m[1]), &p) == nil {
+			return p, nil
+		}
+	}
+	// 2) Try raw JSON
+	var p plan
+	if json.Unmarshal([]byte(strings.TrimSpace(s)), &p) == nil && len(p.Tasks) > 0 {
+		return p, nil
+	}
+	// 3) Try extracting the tasks array and reconstruct object
+	reTasks := regexp.MustCompile(`(?s)"tasks"\s*:\s*(\[[^\]]*\])`)
+	if m := reTasks.FindStringSubmatch(s); len(m) > 1 {
+		body := fmt.Sprintf(`{"tasks":%s}`, m[1])
+		if json.Unmarshal([]byte(body), &p) == nil {
+			return p, nil
+		}
+	}
+	return plan{}, fmt.Errorf("no valid plan JSON found")
+}
+
+func trim(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 // -----------------------------------------------------------------------------
 // AGENT & UTCP BUILDERS
 // -----------------------------------------------------------------------------
@@ -1151,443 +1678,630 @@ func main() {
 	}
 }
 
-// Replace the saveCodeBlocks method with this universal version:
+// NormalizeImports runs all language-specific fixers over the workspace.
+func NormalizeImports(root string) error {
+	_ = normalizeGo(root)
+	_ = normalizePython(root)
+	_ = normalizeJSLike(root)
+	_ = normalizeJavaLike(root)
+	_ = normalizeCppLike(root)
+	_ = normalizePHP(root)
+	return nil
+}
 
-// @package main
-func (m *model) saveCodeBlocks(s string) {
-	m.output += "\n---\n"
-	matches := fenceRe.FindAllStringSubmatch(s, -1)
-	if len(matches) == 0 {
-		m.output += m.style.subtle.Render("No code blocks detected.\n")
-		return
+// --------------------------- GO ----------------------------------------------
+
+func normalizeGo(root string) error {
+	mod := goModulePath(root)
+	if mod == "" {
+		return nil
+	}
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return err
+		}
+		if strings.Contains(p, string(filepath.Separator)+"vendor"+string(filepath.Separator)) {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, p, nil, parser.ParseComments)
+		if err != nil {
+			return nil
+		}
+		changed := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			imp, ok := n.(*ast.ImportSpec)
+			if !ok || imp.Path == nil {
+				return true
+			}
+			path, _ := strconv.Unquote(imp.Path.Value)
+			parts := strings.Split(path, "/")
+			for i := 0; i < len(parts)-1; i++ {
+				if parts[i] == "src" {
+					newPath := mod + "/" + strings.Join(parts[i+1:], "/")
+					if newPath != path {
+						imp.Path.Value = strconv.Quote(newPath)
+						changed = true
+					}
+					break
+				}
+			}
+			return true
+		})
+		if !changed {
+			return nil
+		}
+		var buf bytes.Buffer
+		cfg := &printer.Config{Mode: printer.TabIndent | printer.UseSpaces, Tabwidth: 8}
+		if err := cfg.Fprint(&buf, fset, f); err != nil {
+			return nil
+		}
+		return os.WriteFile(p, buf.Bytes(), 0o644)
+	})
+}
+
+func goModulePath(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
+}
+
+// --------------------------- PYTHON ------------------------------------------
+
+func normalizePython(root string) error {
+	pyFiles := collectFiles(root, ".py")
+	if len(pyFiles) == 0 {
+		return nil
 	}
 
-	manifest := make(map[string][]fileMeta)
+	reFrom := regexp.MustCompile(`(?m)^\s*from\s+([A-Za-z0-9_\.]+)\s+import\s+`)
+	reImp := regexp.MustCompile(`(?m)^\s*import\s+([A-Za-z0-9_\.]+)`)
 
-	for idx, mth := range matches {
-		lang := strings.ToLower(strings.TrimSpace(mth[1]))
-		code := strings.TrimSpace(mth[2])
-		if lang == "" {
-			lang = guessLanguageFromCode(code)
-		}
-		if lang == "" {
-			lang = "txt"
-		}
-
-		// 1) Respect explicit @path if provided
-		explicit := extractExplicitPath(code)
-		var filename string
-		var targetDir string
-		pkgName := ""
-
-		if explicit != "" {
-			abs := filepath.Join(m.working, explicit)
-			_ = os.MkdirAll(filepath.Dir(abs), 0o755)
-			filename = abs
-			targetDir = filepath.Dir(abs)
-		} else {
-			// 2) Entrypoint safeguard for Go: keep at root
-			if lang == "go" && (strings.Contains(code, "package main") || strings.Contains(code, "func main(")) {
-				targetDir = m.working
-			} else {
-				targetDir, pkgName = m.detectPackageDirectory(lang, code)
-			}
-			_ = os.MkdirAll(targetDir, 0o755)
-			filename = filepath.Join(targetDir, m.guessFilename(lang, code, idx))
-		}
-
-		if err := os.WriteFile(filename, []byte(code+"\n"), 0o644); err != nil {
-			m.output += m.style.error.Render(fmt.Sprintf("❌ failed to save %s: %v\n", filename, err))
+	for _, p := range pyFiles {
+		orig, err := os.ReadFile(p)
+		if err != nil {
 			continue
 		}
+		txt := string(orig)
+		changed := false
 
-		key := lang
-		if pkgName != "" {
-			key = pkgName
+		stripper := func(mod string) string {
+			m := mod
+			m = strings.TrimPrefix(m, "src.")
+			m = strings.ReplaceAll(m, ".src.", ".")
+			m = strings.TrimPrefix(m, moduleNameFromRoot(root)+".")
+			m = strings.TrimPrefix(m, moduleNameFromRoot(root)+".src.")
+			return m
 		}
-		manifest[key] = append(manifest[key], fileMeta{Name: filepath.Base(filename), Path: filename})
-		m.output += m.style.success.Render(fmt.Sprintf("💾 saved %s\n", filename))
-	}
 
-	for key, files := range manifest {
-		lang := guessPrimaryLang(files)
-		m.addImports(lang, files)
-		if len(files) > 1 || key != lang {
-			saveManifest(filepath.Dir(files[0].Path), key, files)
-		}
-	}
-}
-
-// Universal package/module detector for ANY programming language
-func (m *model) detectPackageDirectory(lang, code string) (string, string) {
-	// Try universal patterns first
-	if pkg := extractUniversalPackage(code); pkg != "" {
-		pkgDir := filepath.Join(m.working, pkg)
-		return pkgDir, pkg
-	}
-
-	// Language-specific detection
-	switch lang {
-	case "go":
-		if pkg := extractGoPackage(code); pkg != "" && pkg != "main" {
-			return filepath.Join(m.working, pkg), pkg
-		}
-		return m.working, ""
-
-	case "python", "py":
-		if pkg := extractPythonPackage(code); pkg != "" {
-			return filepath.Join(m.working, pkg), pkg
-		}
-		return filepath.Join(m.working, lang), ""
-
-	case "js", "javascript", "ts", "typescript":
-		if pkg := extractJSPackage(code); pkg != "" {
-			return filepath.Join(m.working, pkg), pkg
-		}
-		return filepath.Join(m.working, lang), ""
-
-	case "rs", "rust":
-		if mod := extractRustModule(code); mod != "" {
-			return filepath.Join(m.working, "src", mod), mod
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "java":
-		if pkg := extractJavaPackage(code); pkg != "" {
-			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, "src", pkgPath), pkg
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "cs", "csharp", "c#":
-		if ns := extractCSharpNamespace(code); ns != "" {
-			nsPath := strings.ReplaceAll(ns, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, nsPath), ns
-		}
-		return filepath.Join(m.working, lang), ""
-
-	case "cpp", "c++", "cc", "cxx":
-		if ns := extractCppNamespace(code); ns != "" {
-			return filepath.Join(m.working, "include", ns), ns
-		}
-		if strings.Contains(code, "#ifndef") || strings.Contains(code, "#pragma once") {
-			return filepath.Join(m.working, "include"), ""
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "c":
-		if strings.Contains(code, "#ifndef") || strings.Contains(code, "#pragma once") {
-			return filepath.Join(m.working, "include"), ""
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "rb", "ruby":
-		if mod := extractRubyModule(code); mod != "" {
-			return filepath.Join(m.working, "lib", strings.ToLower(mod)), mod
-		}
-		return filepath.Join(m.working, "lib"), ""
-
-	case "php":
-		if ns := extractPHPNamespace(code); ns != "" {
-			nsPath := strings.ReplaceAll(ns, "\\", string(os.PathSeparator))
-			return filepath.Join(m.working, "src", nsPath), ns
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "kt", "kotlin":
-		if pkg := extractKotlinPackage(code); pkg != "" {
-			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, "src", pkgPath), pkg
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "swift":
-		if mod := extractSwiftModule(code); mod != "" {
-			return filepath.Join(m.working, "Sources", mod), mod
-		}
-		return filepath.Join(m.working, "Sources"), ""
-
-	case "dart":
-		if pkg := extractDartPackage(code); pkg != "" {
-			return filepath.Join(m.working, "lib", pkg), pkg
-		}
-		return filepath.Join(m.working, "lib"), ""
-
-	case "lua":
-		if mod := extractLuaModule(code); mod != "" {
-			return filepath.Join(m.working, mod), mod
-		}
-		return m.working, ""
-
-	case "elixir", "ex":
-		if mod := extractElixirModule(code); mod != "" {
-			modPath := strings.ReplaceAll(mod, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, "lib", strings.ToLower(modPath)), mod
-		}
-		return filepath.Join(m.working, "lib"), ""
-
-	case "scala":
-		if pkg := extractScalaPackage(code); pkg != "" {
-			pkgPath := strings.ReplaceAll(pkg, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, "src", "main", "scala", pkgPath), pkg
-		}
-		return filepath.Join(m.working, "src", "main", "scala"), ""
-
-	case "clojure", "clj":
-		if ns := extractClojureNamespace(code); ns != "" {
-			nsPath := strings.ReplaceAll(ns, ".", string(os.PathSeparator))
-			nsPath = strings.ReplaceAll(nsPath, "-", "_")
-			return filepath.Join(m.working, "src", nsPath), ns
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "haskell", "hs":
-		if mod := extractHaskellModule(code); mod != "" {
-			modPath := strings.ReplaceAll(mod, ".", string(os.PathSeparator))
-			return filepath.Join(m.working, "src", modPath), mod
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	case "r":
-		if pkg := extractRPackage(code); pkg != "" {
-			return filepath.Join(m.working, "R", pkg), pkg
-		}
-		return filepath.Join(m.working, "R"), ""
-
-	case "julia", "jl":
-		if mod := extractJuliaModule(code); mod != "" {
-			return filepath.Join(m.working, "src", mod), mod
-		}
-		return filepath.Join(m.working, "src"), ""
-
-	default:
-		// Generic fallback: try to detect any module-like structure
-		return filepath.Join(m.working, lang), ""
-	}
-}
-
-// Universal package detector - works across multiple languages
-func extractUniversalPackage(code string) string {
-	// Look for common comment annotations
-	patterns := []string{
-		`@package\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`,
-		`@module\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`,
-		`#\s*package:\s*([a-zA-Z_][a-zA-Z0-9_.-]*)`,
-		`//\s*package:\s*([a-zA-Z_][a-zA-Z0-9_.-]*)`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if match := re.FindStringSubmatch(code); len(match) > 1 {
-			return match[1]
-		}
-	}
-	return ""
-}
-
-// Language-specific extractors
-func extractGoPackage(code string) string {
-	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractPythonPackage(code string) string {
-	if strings.Contains(code, "__all__") || strings.Contains(code, "__init__") {
-		if strings.Contains(code, "class ") {
-			if name := extractAfter(code, "class "); name != "" {
-				return strings.ToLower(name)
+		txt = reFrom.ReplaceAllStringFunc(txt, func(line string) string {
+			m := reFrom.FindStringSubmatch(line)
+			if len(m) < 2 {
+				return line
 			}
+			newMod := stripper(m[1])
+			if newMod != m[1] {
+				changed = true
+				return strings.Replace(line, "from "+m[1]+" ", "from "+newMod+" ", 1)
+			}
+			return line
+		})
+		txt = reImp.ReplaceAllStringFunc(txt, func(line string) string {
+			m := reImp.FindStringSubmatch(line)
+			if len(m) < 2 {
+				return line
+			}
+			newMod := stripper(m[1])
+			if newMod != m[1] {
+				changed = true
+				return strings.Replace(line, "import "+m[1], "import "+newMod, 1)
+			}
+			return line
+		})
+
+		if changed {
+			_ = os.WriteFile(p, []byte(txt), 0o644)
 		}
 	}
-	return ""
-}
 
-func extractJSPackage(code string) string {
-	re := regexp.MustCompile(`[@/]\s*(?:package|module)\s+([a-zA-Z_][a-zA-Z0-9_-]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
+	// Ensure __init__.py in packages (dirs with .py files)
+	dirs := map[string]struct{}{}
+	for _, p := range pyFiles {
+		dirs[filepath.Dir(p)] = struct{}{}
 	}
-	return ""
-}
-
-func extractRustModule(code string) string {
-	re := regexp.MustCompile(`(?m)^(?:pub\s+)?mod\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractJavaPackage(code string) string {
-	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractCSharpNamespace(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractCppNamespace(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractRubyModule(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*module\s+([A-Z][a-zA-Z0-9_]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractPHPNamespace(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*namespace\s+([a-zA-Z_][a-zA-Z0-9_\\]*)\s*;`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractKotlinPackage(code string) string {
-	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractSwiftModule(code string) string {
-	// Swift doesn't have explicit module syntax in source files
-	// Look for major type declarations instead
-	if strings.Contains(code, "public struct") || strings.Contains(code, "public class") {
-		re := regexp.MustCompile(`public\s+(?:struct|class)\s+([A-Z][a-zA-Z0-9_]*)`)
-		if match := re.FindStringSubmatch(code); len(match) > 1 {
-			return match[1]
+	for d := range dirs {
+		init := filepath.Join(d, "__init__.py")
+		if _, err := os.Stat(init); os.IsNotExist(err) {
+			_ = os.WriteFile(init, []byte{}, 0o644)
 		}
 	}
-	return ""
+	return nil
 }
 
-func extractDartPackage(code string) string {
-	re := regexp.MustCompile(`(?m)^library\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
+func moduleNameFromRoot(root string) string {
+	return filepath.Base(root)
 }
 
-func extractLuaModule(code string) string {
-	// Lua modules are typically returned tables
-	re := regexp.MustCompile(`(?m)^local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{\}`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		if strings.Contains(code, "return "+match[1]) {
-			return match[1]
-		}
-	}
-	return ""
-}
+// --------------------------- JS / TS -----------------------------------------
 
-func extractElixirModule(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*defmodule\s+([A-Z][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractScalaPackage(code string) string {
-	re := regexp.MustCompile(`(?m)^package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractClojureNamespace(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*\(\s*ns\s+([a-zA-Z_][a-zA-Z0-9_.-]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractHaskellModule(code string) string {
-	re := regexp.MustCompile(`(?m)^module\s+([A-Z][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractRPackage(code string) string {
-	// R doesn't have explicit package syntax in individual files
-	// Look for roxygen documentation or library calls
-	re := regexp.MustCompile(`#'\s*@package\s+([a-zA-Z_][a-zA-Z0-9_.]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func extractJuliaModule(code string) string {
-	re := regexp.MustCompile(`(?m)^\s*module\s+([A-Z][a-zA-Z0-9_]*)`)
-	if match := re.FindStringSubmatch(code); len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func guessPrimaryLang(files []fileMeta) string {
+func normalizeJSLike(root string) error {
+	jsExts := []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
+	files := collectFilesMany(root, jsExts)
 	if len(files) == 0 {
-		return "txt"
+		return nil
 	}
-	ext := filepath.Ext(files[0].Name)
-	return strings.TrimPrefix(ext, ".")
+	re := regexp.MustCompile(`(?m)^\s*(?:import|export)\s+(?:[^'"]*?\s+from\s+)?["']([^"']+)["']`)
+	for _, p := range files {
+		orig, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		txt := string(orig)
+		changed := false
+
+		txt = re.ReplaceAllStringFunc(txt, func(line string) string {
+			m := re.FindStringSubmatch(line)
+			if len(m) < 2 {
+				return line
+			}
+			target := m[1]
+			if strings.HasPrefix(target, ".") || strings.HasPrefix(target, "@") {
+				return line
+			}
+			if idx := strings.Index(target, "/src/"); idx >= 0 {
+				suffix := target[idx+len("/src/"):]
+				newRel := relFromTo(filepath.Dir(p), filepath.Join(root, "src", filepath.FromSlash(suffix)))
+				if newRel != "" && newRel != target {
+					changed = true
+					return strings.Replace(line, `"`+target+`"`, `"`+newRel+`"`, 1)
+				}
+			}
+			if strings.HasPrefix(target, "src/") {
+				suffix := strings.TrimPrefix(target, "src/")
+				newRel := relFromTo(filepath.Dir(p), filepath.Join(root, "src", filepath.FromSlash(suffix)))
+				if newRel != "" && newRel != target {
+					changed = true
+					return strings.Replace(line, `"`+target+`"`, `"`+newRel+`"`, 1)
+				}
+			}
+			if isUnderRoot(root, target) {
+				abs := filepath.Join(root, filepath.FromSlash(target))
+				newRel := relFromTo(filepath.Dir(p), abs)
+				if newRel != "" && newRel != target {
+					changed = true
+					return strings.Replace(line, `"`+target+`"`, `"`+newRel+`"`, 1)
+				}
+			}
+			return line
+		})
+
+		if changed {
+			_ = os.WriteFile(p, []byte(txt), 0o644)
+		}
+	}
+	return nil
 }
 
-// Update dirForLanguage for universal language support
-func (m *model) dirForLanguage(lang string) string {
-	switch lang {
-	case "go":
-		return m.working
-	case "rs", "rust":
-		return filepath.Join(m.working, "src")
-	case "java", "kt", "kotlin", "scala":
-		return filepath.Join(m.working, "src")
-	case "rb", "ruby":
-		return filepath.Join(m.working, "lib")
-	case "php":
-		return filepath.Join(m.working, "src")
-	case "swift":
-		return filepath.Join(m.working, "Sources")
-	case "dart":
-		return filepath.Join(m.working, "lib")
-	case "elixir", "ex":
-		return filepath.Join(m.working, "lib")
-	case "clojure", "clj":
-		return filepath.Join(m.working, "src")
-	case "haskell", "hs":
-		return filepath.Join(m.working, "src")
-	case "r":
-		return filepath.Join(m.working, "R")
-	case "julia", "jl":
-		return filepath.Join(m.working, "src")
-	case "c", "cpp", "c++", "cc", "cxx":
-		return filepath.Join(m.working, "src")
-	default:
-		return filepath.Join(m.working, lang)
+// --------------------------- JAVA / KOTLIN -----------------------------------
+
+func normalizeJavaLike(root string) error {
+	javaExts := []string{".java", ".kt"}
+	files := collectFilesMany(root, javaExts)
+	if len(files) == 0 {
+		return nil
 	}
+	rePkg := regexp.MustCompile(`(?m)^(package\s+)([A-Za-z0-9_.]+)\s*;`)
+	reImp := regexp.MustCompile(`(?m)^(import\s+)([A-Za-z0-9_.]+)\s*;`)
+	for _, p := range files {
+		orig, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		txt := string(orig)
+		changed := false
+		fix := func(s string) (string, bool) {
+			ns := strings.ReplaceAll(s, ".src.", ".")
+			ns = strings.TrimPrefix(ns, "src.")
+			ns = strings.ReplaceAll(ns, "..", ".")
+			return ns, ns != s
+		}
+		txt = rePkg.ReplaceAllStringFunc(txt, func(line string) string {
+			prefix, name := rePkg.FindStringSubmatch(line)[1], rePkg.FindStringSubmatch(line)[2]
+			if nn, ok := fix(name); ok {
+				changed = true
+				return prefix + nn + ";"
+			}
+			return line
+		})
+		txt = reImp.ReplaceAllStringFunc(txt, func(line string) string {
+			prefix, name := reImp.FindStringSubmatch(line)[1], reImp.FindStringSubmatch(line)[2]
+			if nn, ok := fix(name); ok {
+				changed = true
+				return prefix + nn + ";"
+			}
+			return line
+		})
+		if changed {
+			_ = os.WriteFile(p, []byte(txt), 0o644)
+		}
+	}
+	return nil
+}
+
+// --------------------------- C / C++ -----------------------------------------
+
+func normalizeCppLike(root string) error {
+	ccExts := []string{".c", ".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx"}
+	files := collectFilesMany(root, ccExts)
+	if len(files) == 0 {
+		return nil
+	}
+	re := regexp.MustCompile(`(?m)^\s*#\s*include\s*[<"]([^">]+)[">]`)
+	for _, p := range files {
+		orig, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		txt := string(orig)
+		changed := false
+
+		txt = re.ReplaceAllStringFunc(txt, func(line string) string {
+			m := re.FindStringSubmatch(line)
+			if len(m) < 2 {
+				return line
+			}
+			target := m[1]
+			if strings.Contains(target, "/src/") {
+				suffix := target[strings.Index(target, "/src/")+len("/src/"):]
+				abs := filepath.Join(root, "src", filepath.FromSlash(suffix))
+				if _, err := os.Stat(abs); err == nil {
+					newRel := relFromTo(filepath.Dir(p), abs)
+					if newRel != "" {
+						changed = true
+						return strings.Replace(line, target, newRel, 1)
+					}
+				}
+			}
+			if isUnderRoot(root, target) {
+				abs := filepath.Join(root, filepath.FromSlash(target))
+				if _, err := os.Stat(abs); err == nil {
+					newRel := relFromTo(filepath.Dir(p), abs)
+					if newRel != "" {
+						changed = true
+						return strings.Replace(line, target, newRel, 1)
+					}
+				}
+			}
+			return line
+		})
+
+		if changed {
+			_ = os.WriteFile(p, []byte(txt), 0o644)
+		}
+	}
+	return nil
+}
+
+// --------------------------- PHP (PSR-4-ish) ---------------------------------
+
+func normalizePHP(root string) error {
+	files := collectFiles(root, ".php")
+	if len(files) == 0 {
+		return nil
+	}
+	re := regexp.MustCompile(`(?m)^\s*use\s+([A-Za-z0-9_\\]+)\s*;`)
+	for _, p := range files {
+		orig, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		txt := string(orig)
+		changed := false
+		txt = re.ReplaceAllStringFunc(txt, func(line string) string {
+			m := re.FindStringSubmatch(line)
+			if len(m) < 2 {
+				return line
+			}
+			name := m[1]
+			nn := strings.ReplaceAll(name, `\Src\`, `\`)
+			if nn != name {
+				changed = true
+				return strings.Replace(line, name, nn, 1)
+			}
+			return line
+		})
+		if changed {
+			_ = os.WriteFile(p, []byte(txt), 0o644)
+		}
+	}
+	return nil
+}
+
+// --------------------------- Helpers -----------------------------------------
+
+func collectFiles(root, ext string) []string {
+	var out []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if strings.EqualFold(filepath.Ext(p), ext) {
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out
+}
+
+func collectFilesMany(root string, exts []string) []string {
+	extSet := map[string]struct{}{}
+	for _, e := range exts {
+		extSet[strings.ToLower(e)] = struct{}{}
+	}
+
+	var out []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if _, ok := extSet[strings.ToLower(filepath.Ext(p))]; ok {
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out
+}
+
+func relFromTo(fromDir, absTarget string) string {
+	rel, err := filepath.Rel(fromDir, absTarget)
+	if err != nil {
+		return ""
+	}
+	if !strings.HasPrefix(rel, ".") {
+		rel = "./" + filepath.ToSlash(rel)
+	} else {
+		rel = filepath.ToSlash(rel)
+	}
+	return rel
+}
+
+func isUnderRoot(root, target string) bool {
+	abs := filepath.Join(root, filepath.FromSlash(target))
+	_, err := os.Stat(abs)
+	return err == nil
+}
+
+func allowedFileForLang(path, lang string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	langExts := map[string][]string{
+		"go":         {".go"},
+		"python":     {".py"},
+		"py":         {".py"},
+		"js":         {".js", ".jsx"},
+		"ts":         {".ts", ".tsx"},
+		"typescript": {".ts", ".tsx"},
+		"rust":       {".rs"},
+		"java":       {".java"},
+		"cpp":        {".cpp", ".cc", ".cxx", ".h"},
+		"c":          {".c", ".h"},
+		"rb":         {".rb"},
+		"ruby":       {".rb"},
+		"php":        {".php"},
+		"kotlin":     {".kt"},
+		"swift":      {".swift"},
+		"dart":       {".dart"},
+		"lua":        {".lua"},
+		"r":          {".r"},
+		"scala":      {".scala"},
+	}
+
+	exts, ok := langExts[strings.ToLower(lang)]
+	if !ok {
+		// fallback: accept only standard code files
+		return allowedFile(path)
+	}
+
+	for _, e := range exts {
+		if ext == e {
+			return true
+		}
+	}
+	return false
+}
+
+// detectPromptLanguage tries to infer the programming language
+// the user wants to work with based on their prompt text.
+// It scans both explicit keywords (like “in Go” or “use TypeScript”)
+// and implicit hints (like fenced code blocks).
+func detectPromptLanguage(prompt string) string {
+	prompt = strings.ToLower(prompt)
+
+	// 1. Direct language keywords
+	switch {
+	case strings.Contains(prompt, "golang") || strings.Contains(prompt, " in go") || strings.Contains(prompt, "use go"):
+		return "go"
+	case strings.Contains(prompt, "python"):
+		return "python"
+	case strings.Contains(prompt, "typescript") || strings.Contains(prompt, " ts ") || strings.Contains(prompt, " in ts"):
+		return "ts"
+	case strings.Contains(prompt, "javascript") || strings.Contains(prompt, " js ") || strings.Contains(prompt, "node"):
+		return "js"
+	case strings.Contains(prompt, "rust"):
+		return "rust"
+	case strings.Contains(prompt, "java"):
+		return "java"
+	case strings.Contains(prompt, "c++") || strings.Contains(prompt, "cpp"):
+		return "cpp"
+	case strings.Contains(prompt, "c#") || strings.Contains(prompt, "csharp"):
+		return "cs"
+	case strings.Contains(prompt, "ruby"):
+		return "rb"
+	case strings.Contains(prompt, "php"):
+		return "php"
+	case strings.Contains(prompt, "kotlin"):
+		return "kotlin"
+	case strings.Contains(prompt, "swift"):
+		return "swift"
+	case strings.Contains(prompt, "dart"):
+		return "dart"
+	case strings.Contains(prompt, "lua"):
+		return "lua"
+	case strings.Contains(prompt, "scala"):
+		return "scala"
+	case strings.Contains(prompt, "r "):
+		return "r"
+	case strings.Contains(prompt, "haskell"):
+		return "hs"
+	}
+
+	// 2. Fenced code hints (```go ... ```)
+	re := regexp.MustCompile("```([a-zA-Z0-9_+.-]+)")
+	if m := re.FindStringSubmatch(prompt); len(m) > 1 {
+		return strings.ToLower(m[1])
+	}
+
+	// 3. Default fallback
+	return "go" // sensible default for Lattice (Go-first environment)
+}
+
+// buildCodebaseContext walks the workspace, collects up to maxFiles under size limits,
+// and returns a markdown-formatted CODEBASE SNAPSHOT containing only files matching langFilter.
+func buildCodebaseContext(root string, maxFiles int, maxTotalBytes, perFileLimit int64, langFilter string) (string, int, int64) {
+	var entries []fileEntry
+	var total int64
+
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if isIgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// filter by language
+		if !allowedFileForLang(path, langFilter) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		entries = append(entries, fileEntry{Rel: rel, Abs: path, Size: info.Size()})
+		return nil
+	})
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Rel < entries[j].Rel })
+
+	var included []fileEntry
+	for _, e := range entries {
+		if len(included) >= maxFiles {
+			break
+		}
+		if total >= maxTotalBytes {
+			break
+		}
+		included = append(included, e)
+		capAdd := e.Size
+		if capAdd > perFileLimit {
+			capAdd = perFileLimit
+		}
+		total += capAdd
+	}
+
+	tree := buildTree(included)
+
+	var filesSection strings.Builder
+	for _, f := range included {
+		content, _ := os.ReadFile(f.Abs)
+		if int64(len(content)) > perFileLimit {
+			content = content[:perFileLimit]
+		}
+		lang := fenceLangFromExt(filepath.Ext(f.Rel))
+		filesSection.WriteString("\n### ")
+		filesSection.WriteString(f.Rel)
+		filesSection.WriteString("\n```")
+		filesSection.WriteString(lang)
+		filesSection.WriteString("\n")
+		filesSection.Write(content)
+		filesSection.WriteString("\n```\n")
+	}
+
+	var out strings.Builder
+	out.WriteString("## CODEBASE SNAPSHOT\n")
+	out.WriteString(fmt.Sprintf("- Root: `%s`\n", root))
+	out.WriteString(fmt.Sprintf("- Files included: %d (limit %d)\n", len(included), maxFiles))
+	out.WriteString(fmt.Sprintf("- Size included: %s (limit %s)\n", humanSize(total), humanSize(maxTotalBytes)))
+	out.WriteString("\n### Tree\n```\n")
+	out.WriteString(tree)
+	out.WriteString("\n```\n")
+	out.WriteString(filesSection.String())
+
+	return out.String(), len(included), total
+}
+
+// collectAttachmentFiles gathers actual file contents (used in GenerateWithFiles)
+// filtered by the selected programming language.
+func collectAttachmentFiles(root string, maxFiles int, maxTotalBytes, perFileLimit int64, langFilter string) []models.File {
+	var entries []fileEntry
+	var total int64
+
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if isIgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !allowedFileForLang(path, langFilter) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		entries = append(entries, fileEntry{Rel: rel, Abs: path, Size: info.Size()})
+		return nil
+	})
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Rel < entries[j].Rel })
+
+	var out []models.File
+	for _, e := range entries {
+		if len(out) >= maxFiles || total >= maxTotalBytes {
+			break
+		}
+		b, err := os.ReadFile(e.Abs)
+		if err != nil {
+			continue
+		}
+		if int64(len(b)) > perFileLimit {
+			b = b[:perFileLimit]
+		}
+		out = append(out, models.File{
+			Name: e.Rel,
+			MIME: mimeForPath(e.Rel),
+			Data: b,
+		})
+		add := e.Size
+		if add > perFileLimit {
+			add = perFileLimit
+		}
+		total += add
+	}
+	return out
 }
