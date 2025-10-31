@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -41,6 +42,46 @@ type generateMsg struct {
 	agentName string
 	text      string
 	err       error
+}
+
+// parseAgentDirective interprets the optional leading @agent selector in the
+// prompt. It returns the resolved agent, the trimmed prompt text, and a flag
+// indicating whether the caller explicitly selected an agent.
+func parseAgentDirective(input, defaultAgent string, agents map[string]*plagent.Agent) (string, string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return defaultAgent, "", false
+	}
+	if !strings.HasPrefix(trimmed, "@") {
+		return defaultAgent, trimmed, false
+	}
+
+	body := []rune(trimmed[1:])
+	if len(body) == 0 {
+		return defaultAgent, "", false
+	}
+
+	var i int
+	for i = 0; i < len(body); i++ {
+		r := body[i]
+		if unicode.IsSpace(r) || r == ':' {
+			break
+		}
+		body[i] = unicode.ToLower(r)
+	}
+
+	agent := strings.ToLower(string(body[:i]))
+	if agent == "" {
+		return defaultAgent, trimmed, false
+	}
+	if _, ok := agents[agent]; !ok {
+		return defaultAgent, trimmed, false
+	}
+
+	rest := strings.TrimLeftFunc(string(body[i:]), func(r rune) bool {
+		return unicode.IsSpace(r) || r == ':'
+	})
+	return agent, strings.TrimSpace(rest), true
 }
 
 type resizeMsg struct {
@@ -216,22 +257,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			// only send if input focused and not thinking
 			if m.ta.Focused() && !m.thinking {
-				prompt := strings.TrimSpace(m.ta.Value())
+				raw := m.ta.Value()
+				targetAgent, prompt, explicit := parseAgentDirective(raw, m.currentAgent, m.agents)
+				prompt = strings.TrimSpace(prompt)
 				if prompt == "" {
 					return m.appendLine("⚠️  Please type something."), nil
 				}
 
-				// Parse @agent directive
-				targetAgent := m.currentAgent
-				if strings.HasPrefix(prompt, "@") {
-					parts := strings.SplitN(prompt, " ", 2)
-					if len(parts) > 1 {
-						agent := strings.TrimPrefix(parts[0], "@")
-						if _, ok := m.agents[agent]; ok {
-							targetAgent = agent
-							prompt = parts[1]
-						}
-					}
+				if explicit && targetAgent != m.currentAgent {
+					m.currentAgent = targetAgent
 				}
 
 				m.thinking = true
