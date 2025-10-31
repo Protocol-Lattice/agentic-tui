@@ -242,16 +242,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 
 			// ---- Directory selection ----
+			// Fix for Enter key in directory selection mode — currently it only navigates deeper but doesn’t confirm the selected directory.
+			// Update the modeDir case under the `enter` key handling to confirm selection if not a directory.
+
 			case modeDir:
 				if i, ok := m.dirlist.SelectedItem().(dirItem); ok {
 					info, err := os.Stat(i.path)
 					if err == nil && info.IsDir() {
+						// Navigate deeper into subdirectory
 						m.history = append(m.history, i.path)
 						m.working = i.path
 						m.dirlist.SetItems(loadDirs(i.path))
 						return m, nil
 					}
+					// FIX: if it's not a directory (e.g., confirm current), switch to agent list
+					if err != nil || !info.IsDir() {
+						m.mode = modeList
+						return m, nil
+					}
 				}
+				// If nothing selected, just continue
 				m.mode = modeList
 				return m, nil
 
@@ -328,37 +338,46 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, tea.Batch(cmd, thinkingTick())
 
-			// ---- Inline prompt (new @utcp support) ----
+				// ---- Inline prompt (new @utcp support) ----
+			// The Enter key isn't triggering prompt submission because the 'generate' command is missing in modePrompt.
+			// Fix: replace the modePrompt enter handling with one that spawns a goroutine to run the agent and emit generateMsg.
+
 			case modePrompt:
 				prompt := strings.TrimSpace(m.textarea.Value())
 				if prompt == "" {
 					return m, nil
 				}
+
 				m.prevMode = m.mode
 				m.mode = modeThinking
 				m.output = ""
 				m.thinking = "thinking"
 
-				// Handle inline UTCP calls
+				// Handle inline UTCP commands
 				if strings.HasPrefix(prompt, "@utcp ") {
 					cmd := func() tea.Msg {
 						res, err := m.runUTCPInline(prompt)
 						if err != nil {
 							return generateMsg{"", err}
 						}
+						m.saveCodeBlocks(res)
 						return generateMsg{res, nil}
 					}
 					return m, tea.Batch(cmd, thinkingTick())
 				}
 
-				// Default: normal agent request
-				_, err := m.agent.Generate(context.Background(), "1", prompt)
-				if err != nil {
-					m.mode = modeResult
-					m.output = m.style.error.Render(fmt.Sprintf("❌ %v", err))
-					return m, nil
+				// Normal agent generation
+				cmd := func() tea.Msg {
+					res, err := m.agent.Generate(m.ctx, "1", prompt)
+					if err != nil {
+						return generateMsg{"", err}
+					}
+					// Save code to files
+					m.saveCodeBlocks(res)
+					return generateMsg{res, nil}
 				}
-				return m, tea.Batch(thinkingTick())
+
+				return m, tea.Batch(cmd, thinkingTick())
 
 			// ---- Results view ----
 			case modeResult, modeDone:
