@@ -21,7 +21,7 @@ func (m *model) viewHeader() string {
 	logoStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#AD8CFF")).Bold(true).
 		Background(lipgloss.Color("#000000")).UnsetBackground()
-	subtitle := m.style.header.Render("Protocol Lattice Labs")
+	subtitle := m.style.header.Render("Protocol Lattice")
 	styledLogo := logoStyle.Render(logo)
 
 	return lipgloss.JoinVertical(lipgloss.Left, styledLogo, subtitle)
