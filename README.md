@@ -1,5 +1,5 @@
 <p align="center">
-<img width="473" height="127" alt="Zrzut ekranu 2025-11-1 o 12 32 24" src="https://github.com/user-attachments/assets/f5398bc7-05b4-4777-bdb2-87995751bb57" />
+<img width="1000" height="200" alt="Zrzut ekranu 2025-11-1 o 12 32 24" src="https://github.com/user-attachments/assets/f5398bc7-05b4-4777-bdb2-87995751bb57" />
 </p>
 
 ---
