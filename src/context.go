@@ -129,7 +129,7 @@ func fenceLangFromExt(ext string) string {
 	}
 }
 
-func humanSize(n int64) string {
+func HumanSize(n int64) string {
 	const (
 		kb = 1024
 		mb = 1024 * kb
@@ -139,9 +139,9 @@ func humanSize(n int64) string {
 	case n >= gb:
 		return fmt.Sprintf("%.2f GB", float64(n)/float64(gb))
 	case n >= mb:
-		return fmt.Sprintf("%.2f MB", float64(n)/float64(mb))
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(mb))
 	case n >= kb:
-		return fmt.Sprintf("%.2f KB", float64(n)/float64(kb))
+		return fmt.Sprintf("%.0f KB", float64(n)/float64(kb))
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
@@ -383,7 +383,7 @@ func buildCodebaseContext(root string, maxFiles int, maxTotalBytes, perFileLimit
 	out.WriteString("## CODEBASE SNAPSHOT\n")
 	out.WriteString(fmt.Sprintf("- Root: `%s`\n", root))
 	out.WriteString(fmt.Sprintf("- Files included: %d (limit %d)\n", len(included), maxFiles))
-	out.WriteString(fmt.Sprintf("- Size included: %s (limit %s)\n", humanSize(total), humanSize(maxTotalBytes)))
+	out.WriteString(fmt.Sprintf("- Size included: %s (limit %s)\n", HumanSize(total), HumanSize(maxTotalBytes)))
 	out.WriteString("\n### Tree\n```\n")
 	out.WriteString(tree)
 	out.WriteString("\n```\n")

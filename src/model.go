@@ -112,21 +112,24 @@ type model struct {
 }
 
 type styles struct {
-	header       lipgloss.Style
-	subtitle     lipgloss.Style
-	list         lipgloss.Style
-	listHeader   lipgloss.Style
-	listItem     lipgloss.Style
-	listSelected lipgloss.Style
-	textarea     lipgloss.Style
-	help         lipgloss.Style
-	footer       lipgloss.Style
-	accent       lipgloss.Style
-	error        lipgloss.Style
-	success      lipgloss.Style
-	thinking     lipgloss.Style
-	subtle       lipgloss.Style
-	center       lipgloss.Style
+	header        lipgloss.Style
+	subtitle      lipgloss.Style
+	list          lipgloss.Style
+	listHeader    lipgloss.Style
+	listItem      lipgloss.Style
+	listSelected  lipgloss.Style
+	textarea      lipgloss.Style
+	help          lipgloss.Style
+	footer        lipgloss.Style
+	accent        lipgloss.Style
+	error         lipgloss.Style
+	success       lipgloss.Style
+	thinking      lipgloss.Style
+	status        lipgloss.Style
+	statusRight   lipgloss.Style
+	chatContainer lipgloss.Style
+	subtle        lipgloss.Style
+	center        lipgloss.Style
 }
 
 func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, startDir string) *model {
@@ -225,6 +228,20 @@ func newStyles() styles {
 
 		thinking: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#3DDC97")), // Changed to green
+
+		status: lipgloss.NewStyle().
+			Background(lipgloss.Color("#AD8CFF")).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Padding(0, 1),
+
+		statusRight: lipgloss.NewStyle().
+			Inherit(lipgloss.NewStyle().
+				Background(lipgloss.Color("#AD8CFF")).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Padding(0, 1)).Align(lipgloss.Right),
+
+		chatContainer: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#AD8CFF")).Padding(0, 1),
 
 		subtle: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#999999")),

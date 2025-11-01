@@ -61,12 +61,22 @@ func (m *model) viewList() string {
 }
 
 func (m *model) viewChat() string {
-	return lipgloss.JoinVertical(lipgloss.Left,
+	// Status bar for the viewport
+	status := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.style.status.Render(m.selected.name),
+		m.style.statusRight.Render(fmt.Sprintf("CTX: %d files (%s)", m.contextFiles, HumanSize(m.contextBytes))),
+	)
+
+	// Main chat view with a border
+	chatView := lipgloss.JoinVertical(lipgloss.Left,
 		m.style.subtitle.Render(fmt.Sprintf("Working Directory: %s", m.working)),
 		m.viewport.View(),
+		status,
 		m.viewThinking(),
 		m.textarea.View(),
 	)
+
+	return m.style.chatContainer.Render(chatView)
 }
 
 func (m *model) viewThinking() string {
