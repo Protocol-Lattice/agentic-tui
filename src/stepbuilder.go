@@ -2,48 +2,64 @@ package src
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 )
 
-var jsonRe = regexp.MustCompile("(?s)```(?:json[c5]?)?\\s*([{\\[].*?[}\\]])\\s*```")
+var (
+	jsonRe              = regexp.MustCompile("(?is)```(?:json[c5]?|json5)?\\s*([{\\[].*?[}\\]])\\s*```")
+	trailingArrayComma  = regexp.MustCompile(`,\s*\]`)
+	trailingObjectComma = regexp.MustCompile(`,\s*\}`)
+	backtickStringRe    = regexp.MustCompile("`([^`\\\\]*(?:\\\\.[^`\\\\]*)*)`")
+)
 
 // extractJSON finds the first JSON object or array in a string,
 // handling optional markdown fences.
-func extractJSON(raw string) []byte {
+func extractJSON(raw string) ([]byte, error) {
+	candidate := raw
+
 	// First, try to find a fenced JSON block.
 	if matches := jsonRe.FindStringSubmatch(raw); len(matches) > 1 {
-		raw = matches[1]
+		candidate = matches[1]
 	} else {
 		// If no fence is found, fall back to finding the first/last bracket.
 		start := strings.IndexAny(raw, "[{")
 		if start == -1 {
-			return nil // No JSON object or array found.
+			return nil, errors.New("no JSON object or array found")
 		}
 
 		end := strings.LastIndexAny(raw, "}]")
 		if end == -1 || end < start {
-			return nil // No valid end found.
+			return nil, errors.New("no JSON object or array found")
 		}
-		raw = raw[start : end+1]
+		candidate = raw[start : end+1]
 	}
 
-	// At this point, 'raw' should be our best guess at the JSON string.
-	// Now, sanitize it.
-	jsonStr := strings.TrimSpace(raw)
+	// At this point, 'candidate' should be our best guess at the JSON string.
+	jsonStr := strings.TrimSpace(candidate)
+	if jsonStr == "" {
+		return nil, errors.New("empty JSON payload")
+	}
 
 	// Sanitize the JSON string to remove trailing commas.
-	// Remove trailing comma from arrays: `[...,]` -> `[...]`
-	reArray := regexp.MustCompile(`,\s*\]`)
-	jsonStr = reArray.ReplaceAllString(jsonStr, "]")
+	jsonStr = trailingArrayComma.ReplaceAllString(jsonStr, "]")
+	jsonStr = trailingObjectComma.ReplaceAllString(jsonStr, "}")
 
-	// Remove trailing comma from objects: `{...,}` -> `{...}`
-	reObject := regexp.MustCompile(`,\s*\}`)
-	jsonStr = reObject.ReplaceAllString(jsonStr, "}")
+	// Some providers occasionally use backticks instead of double quotes.
+	if strings.Contains(jsonStr, "`") {
+		jsonStr = backtickStringRe.ReplaceAllString(jsonStr, "\"$1\"")
+	}
 
-	return []byte(jsonStr)
+	// Ensure we still have what appears to be JSON.
+	first := jsonStr[0]
+	if first != '{' && first != '[' {
+		return nil, errors.New("response did not contain JSON object or array")
+	}
+
+	return []byte(jsonStr), nil
 }
 
 func (m *model) runStepBuilder(userGoal string) {
@@ -126,7 +142,10 @@ func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
 		}
 	}
 
-	data := extractJSON(raw)
+	data, err := extractJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid plan JSON: %v", err)
+	}
 
 	var plan []planFile
 	if err := json.Unmarshal(data, &plan); err != nil {
@@ -163,7 +182,10 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) { // Note: T
 			return nil, err
 		}
 	}
-	data := extractJSON(raw)
+	data, err := extractJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
+	}
 	var subs []string
 	if err := json.Unmarshal(data, &subs); err != nil {
 		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
@@ -283,7 +305,10 @@ func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
 		}
 	}
 
-	data := extractJSON(raw)
+	data, err := extractJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
+	}
 	var files []planFile
 	if err := json.Unmarshal(data, &files); err != nil {
 		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
