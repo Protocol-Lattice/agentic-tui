@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -18,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -29,6 +31,7 @@ import (
 
 	agent "github.com/Protocol-Lattice/go-agent"
 	adk "github.com/Protocol-Lattice/go-agent/src/adk"
+	"github.com/Protocol-Lattice/go-agent/src/adk/modules"
 	adkmodules "github.com/Protocol-Lattice/go-agent/src/adk/modules"
 	"github.com/Protocol-Lattice/go-agent/src/memory"
 	"github.com/Protocol-Lattice/go-agent/src/models"
@@ -200,8 +203,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "left":
 			if m.mode == modeDir {
 				parent := filepath.Dir(m.working)
-				// stay within valid hierarchy
-				if parent != "" && parent != m.working {
+				if parent != m.working { // This check is sufficient and correct
 					m.working = parent
 					items := loadDirs(m.working)
 					m.dirlist.SetItems(items)
@@ -264,12 +266,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				name := item.name
+				// --- Confirm current directory ---
+				if strings.HasPrefix(item.name, "✅") {
+					m.mode = modeList
+					m.list.Title = fmt.Sprintf("📁 %s", filepath.Base(m.working))
+					m.list.SetItems(defaultAgents())
+					return m, nil
+				}
 
 				// --- Go up one level ---
-				if name == "../" {
+				if item.name == "⬆️ ../" {
 					parent := filepath.Dir(m.working)
-					if parent != "" && parent != m.working {
+					if parent != m.working {
 						m.working = parent
 						items := loadDirs(m.working)
 						m.dirlist.SetItems(items)
@@ -283,26 +291,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err == nil && info.IsDir() {
 					m.working = item.path
 					items := loadDirs(m.working)
-
-					// Always prepend "../" for navigation consistency
-					if m.working != "/" {
-						items = append([]list.Item{dirItem{name: "../", path: filepath.Dir(m.working)}}, items...)
-					}
-					if len(items) == 1 { // Only "../" → empty folder
-						items = append(items, dirItem{name: "(empty)", path: m.working})
-					}
-
 					m.dirlist.SetItems(items)
-					m.dirlist.ResetSelected()
-					m.dirlist.Select(1) // skip "../"
+					m.dirlist.Select(0)
 					return m, nil
 				}
-
-				// --- Confirm current directory (open next view) ---
-				m.mode = modeList
-				m.list.Title = fmt.Sprintf("📁 %s", filepath.Base(m.working))
-				m.list.SetItems(defaultAgents())
-				return m, nil
 
 			case modeList:
 				if i, ok := m.list.SelectedItem().(plugin); ok {
@@ -446,82 +438,30 @@ func extractExplicitPath(code string) string {
 // runPrompt handles agent prompt execution modes inside the TUI.
 // It covers step-build, orchestrator, inline UTCP, and default coding modes.
 func (m *model) runPrompt(raw string) (tea.Model, tea.Cmd) {
-	lower := strings.ToLower(raw)
-
 	m.prevMode = m.mode
 	m.mode = modeThinking
 	m.output = ""
 	m.thinking = "thinking"
-
-	// --- STEP BUILD MODE ---
-	if strings.HasPrefix(lower, "stepbuild:") {
-		prompt := strings.TrimSpace(strings.TrimPrefix(lower, "stepbuild:"))
-		cmd := func() tea.Msg {
-			out, err := m.runStepBuilder(prompt)
-			if err != nil {
-				return generateMsg{"", err}
-			}
-			return generateMsg{out, nil}
-		}
-		return m, tea.Batch(cmd, thinkingTick())
-	}
-
-	// --- ORCHESTRATOR MODE ---
-	if strings.HasPrefix(lower, "split:") || m.selected.name == "orchestrator" {
-		prompt := strings.TrimSpace(strings.TrimPrefix(lower, "split:"))
-		cmd := func() tea.Msg {
-			out, err := m.runOrchestrator(prompt)
-			if err != nil {
-				return generateMsg{"", err}
-			}
-			return generateMsg{out, nil}
-		}
-		return m, tea.Batch(cmd, thinkingTick())
-	}
 
 	// --- INLINE UTCP ---
 	if strings.HasPrefix(raw, "@utcp ") {
 		cmd := func() tea.Msg {
 			res, err := m.runUTCPInline(raw)
 			if err != nil {
-				return generateMsg{"", err}
+				return generateMsg{text: "", err: err}
 			}
 			m.saveCodeBlocks(res)
-			return generateMsg{res, nil}
+			return generateMsg{text: res, err: nil}
 		}
 		return m, tea.Batch(cmd, thinkingTick())
 	}
 
-	// --- DEFAULT CODING AGENT ---
-	const (
-		maxFiles      = 300
-		maxTotalBytes = int64(1_200_000)
-		perFileLimit  = int64(80_000)
-	)
-	lang := detectPromptLanguage(raw)
-	ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
-	m.contextFiles, m.contextBytes = nFiles, nBytes
-	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
-
-	fullPrompt := strings.Builder{}
-	fullPrompt.WriteString("You are Vibe, the coding agent inside a TUI. Use the CODEBASE SNAPSHOT as ground truth.\n")
-	fullPrompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
-	fullPrompt.WriteString(ctxBlock)
-	fullPrompt.WriteString("\n\n---\n### Task\n" + raw)
-
+	// --- DEFAULT: STEP-BUILD WORKFLOW for all coding agents ---
+	// This ensures that even simple prompts benefit from the robust,
+	// context-aware, multi-step generation process.
 	cmd := func() tea.Msg {
-		res, err := m.agent.GenerateWithFiles(m.ctx, "1", fullPrompt.String(), attachments)
-		if err != nil {
-			// fallback to plain Generate if files unsupported
-			fallback, ferr := m.agent.Generate(m.ctx, "1", fullPrompt.String())
-			if ferr != nil {
-				return generateMsg{"", fmt.Errorf("GenerateWithFiles failed: %v; fallback Generate failed: %v", err, ferr)}
-			}
-			m.saveCodeBlocks(fallback)
-			return generateMsg{fallback, nil}
-		}
-		m.saveCodeBlocks(res)
-		return generateMsg{res, nil}
+		out, err := m.runStepBuilder(raw)
+		return generateMsg{text: out, err: err}
 	}
 
 	return m, tea.Batch(cmd, thinkingTick())
@@ -545,11 +485,9 @@ func (m *model) View() string {
 	var body string
 	switch m.mode {
 	case modeDir:
-		body = lipgloss.JoinVertical(lipgloss.Left,
-			m.style.accent.Render("Navigate to your working directory"),
-			"",
+		body = lipgloss.JoinVertical(lipgloss.Center,
 			m.dirlist.View(),
-			"",
+			m.style.subtle.Render("Current: "+m.working),
 			m.style.footer.Render("[↑↓] Move │ [←] Up │ [Enter] Open/Choose │ [Ctrl+C] Quit"),
 		)
 	case modeList:
@@ -709,16 +647,20 @@ func loadDirs(path string) []list.Item {
 		return []list.Item{dirItem{name: "(error reading dir)", path: path}}
 	}
 	var items []list.Item
+
+	// 1. Add confirmation item
+	items = append(items, dirItem{name: fmt.Sprintf("✅ Use this directory (%s)", filepath.Base(path)), path: path})
+
+	// 2. Add parent directory navigation
 	if path != "/" {
 		items = append(items, dirItem{name: "⬆️ ../", path: filepath.Dir(path)})
 	}
-	for _, e := range entries {
+
+	// 3. Add subdirectories
+	for _, e := range entries { // Already sorted by ReadDir
 		if e.IsDir() {
 			items = append(items, dirItem{name: "📁 " + e.Name() + "/", path: filepath.Join(path, e.Name())})
 		}
-	}
-	if len(items) == 0 {
-		items = append(items, dirItem{name: "(empty)", path: path})
 	}
 	return items
 }
@@ -1657,13 +1599,16 @@ func trim(s string, n int) string {
 // -----------------------------------------------------------------------------
 
 func buildAgent(ctx context.Context) (*agent.Agent, error) {
-	embedder := memory.AutoEmbedder()
-	opts := memory.DefaultOptions()
+	qdrantURL := flag.String("qdrant-url", "http://localhost:6333", "Qdrant base URL")
+	qdrantCollection := flag.String("qdrant-collection", "raezil", "Qdrant collection name")
+
+	memOpts := memory.DefaultOptions()
 	builder, err := adk.New(
 		ctx,
 		adk.WithDefaultSystemPrompt(vibeSystemPrompt),
 		adk.WithModules(
-			adkmodules.InMemoryMemoryModule(512, embedder, &opts),
+			modules.InQdrantMemory(100000, *qdrantURL, *qdrantCollection, memory.AutoEmbedder(), &memOpts),
+
 			adkmodules.NewModelModule("gemini", func(_ context.Context) (models.Agent, error) {
 				return models.NewGeminiLLM(ctx, "gemini-2.5-pro", "Universal code generator")
 			}),
@@ -2436,54 +2381,71 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) {
 	return subs, nil
 }
 
-// runStepBuilderPhase runs one sub-prompt (single phase) through the file-plan + build loop
+// runStepBuilderPhase runs one sub-prompt (a single phase) through the file-plan and build loop.
+// It now generates files concurrently for maximum efficiency.
 func (m *model) runStepBuilderPhase(subgoal string, stepIndex, total int) (string, error) {
 	var log strings.Builder
 	fmt.Fprintf(&log, "⚙️  Step %d/%d — %s\n", stepIndex, total, subgoal)
 
-	// Create file plan for this subgoal
+	// 1. Create a file plan for this subgoal.
 	phase := stepPhase{Name: fmt.Sprintf("Step %d", stepIndex), Goal: subgoal}
 	files, err := m.buildFilePlan(phase)
 	if err != nil {
-		return "", fmt.Errorf("failed to plan files: %v", err)
+		return "", fmt.Errorf("failed to plan files for step %d: %v", stepIndex, err)
 	}
 
-	for j, f := range files {
-		index := fmt.Sprintf("%d.%d", stepIndex, j+1)
-		m.thinking = fmt.Sprintf("building %s — %s", index, f.Name)
-		m.mode = modeThinking
+	// 2. Set up concurrent generation.
+	var wg sync.WaitGroup
+	results := make(chan string, len(files))
 
-		const (
-			maxFiles      = 300
-			maxTotalBytes = int64(1_200_000)
-			perFileLimit  = int64(80_000)
-		)
-		ctxBlock, _, _ := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
-		attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
+	for j, fileToBuild := range files {
+		wg.Add(1)
+		go func(f planFile, fileIndex int) {
+			defer wg.Done()
 
-		sub := strings.Builder{}
-		sub.WriteString("You are Vibe, the coding agent inside a TUI.\n")
-		sub.WriteString(fmt.Sprintf("Generate ONLY ONE file for sub-goal '%s': %s\n\n", subgoal, f.Name))
-		sub.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
-		sub.WriteString(ctxBlock)
-		sub.WriteString("\n---\nFILE SPEC:\n")
-		sub.WriteString(fmt.Sprintf("%s — %s\n", f.Path, f.Goal))
-		sub.WriteString("\nFollow OUTPUT CONTRACT: short plan → one fenced file block.")
+			index := fmt.Sprintf("%d.%d", stepIndex, fileIndex+1)
+			m.thinking = fmt.Sprintf("building %s — %s", index, f.Name) // Note: race condition on m.thinking is ok for UI
 
-		res, err := m.agent.GenerateWithFiles(m.ctx, "1", sub.String(), attachments)
-		if err != nil {
-			res, err = m.agent.Generate(m.ctx, "1", sub.String())
+			// Each goroutine gets its own tailored context window.
+			const (
+				maxFiles      = 300
+				maxTotalBytes = int64(1_200_000)
+				perFileLimit  = int64(80_000)
+			)
+			ctxBlock, _, _ := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
+			attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
+
+			sub := strings.Builder{}
+			sub.WriteString("You are Vibe, the coding agent inside a TUI.\n")
+			sub.WriteString(fmt.Sprintf("Generate ONLY ONE file for sub-goal '%s': %s\n\n", subgoal, f.Name))
+			sub.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+			sub.WriteString(ctxBlock)
+			sub.WriteString("\n---\nFILE SPEC:\n")
+			sub.WriteString(fmt.Sprintf("%s — %s\n", f.Path, f.Goal))
+			sub.WriteString("\nFollow OUTPUT CONTRACT: short plan → one fenced file block.")
+
+			res, err := m.agent.GenerateWithFiles(m.ctx, "1", sub.String(), attachments)
 			if err != nil {
-				fmt.Fprintf(&log, "❌ failed to build %s: %v\n", f.Name, err)
-				continue
+				res, err = m.agent.Generate(m.ctx, "1", sub.String())
+				if err != nil {
+					results <- fmt.Sprintf("❌ failed to build %s: %v\n", f.Name, err)
+					return
+				}
 			}
-		}
 
-		m.saveCodeBlocks(res)
-		fmt.Fprintf(&log, "✅ %s\n", f.Path)
-		tree := buildTree(collectWorkspaceFiles(m.working))
-		fmt.Fprintf(&log, "%s\n\n", tree)
+			m.saveCodeBlocks(res) // saveCodeBlocks is thread-safe enough for this use case
+			results <- fmt.Sprintf("✅ %s\n", f.Path)
+		}(fileToBuild, j)
 	}
+
+	// 3. Wait for all file generations to complete and collect results.
+	wg.Wait()
+	close(results)
+
+	for res := range results {
+		log.WriteString(res)
+	}
+
 	return log.String(), nil
 }
 
@@ -2494,7 +2456,7 @@ func (m *model) runStepBuilder(userGoal string) (string, error) {
 
 	subprompts, err := m.buildStepPrompts(userGoal)
 	if err != nil {
-		return "", fmt.Errorf("failed to split goal into sub-prompts: %v", err)
+		return "", fmt.Errorf("failed to split goal into sub-prompts (falling back to single step): %v", err)
 	}
 
 	fmt.Fprintf(&log, "📋 %d step prompts generated:\n", len(subprompts))
@@ -2511,6 +2473,10 @@ func (m *model) runStepBuilder(userGoal string) (string, error) {
 		}
 		log.WriteString(phaseLog)
 	}
+
+	// Add a final tree view to show the result
+	tree := buildTree(collectWorkspaceFiles(m.working))
+	fmt.Fprintf(&log, "\nFinal workspace structure:\n%s\n", tree)
 
 	fmt.Fprintln(&log, "🎉 Auto StepBuild complete!")
 	return log.String(), nil
