@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -65,6 +66,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeDir
 			return m, nil
 
+		case "ctrl+s": // New: set session ID
+			m.prevMode = m.mode
+			m.mode = modeSession
+			m.textarea.Placeholder = "Enter new session ID..."
+			m.textarea.SetValue(m.sessionID)
+			m.textarea.Focus()
+			return m, nil
+
+		case "ctrl+w": // New: set sWarm spaces
+			m.prevMode = m.mode
+			m.mode = modeSwarm
+			m.textarea.Placeholder = "Enter shared spaces (comma-separated)..."
+			m.textarea.SetValue(strings.Join(m.sharedSpaces, ", "))
+			m.textarea.Focus()
+			return m, nil
+
 		case "left":
 			if m.mode == modeDir {
 				parent := filepath.Dir(m.working)
@@ -101,7 +118,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.mode == modePrompt || m.mode == modeChat {
-				m.mode = modeList
+				m.mode = modeChat
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
@@ -110,7 +127,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "esc":
 			switch m.mode {
-			case modePrompt, modeResult, modeUTCPArgs, modeChat:
+			case modePrompt, modeResult, modeUTCPArgs, modeChat, modeSession, modeSwarm:
 				m.mode = modeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
@@ -244,6 +261,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m.runPrompt(raw)
+
+			case modeSession:
+				newID := strings.TrimSpace(m.textarea.Value())
+				if newID != "" {
+					m.sessionID = newID
+				}
+				m.mode = modeChat
+				m.textarea.Reset()
+				m.textarea.Placeholder = "Describe your task or goal..."
+				return m, nil
+
+			case modeSwarm:
+				spacesStr := strings.TrimSpace(m.textarea.Value())
+				if spacesStr == "" {
+					m.sharedSpaces = nil
+				} else {
+					m.sharedSpaces = strings.FieldsFunc(spacesStr, func(c rune) bool {
+						return c == ',' || unicode.IsSpace(c)
+					})
+				}
+				m.mode = modeChat
+				m.textarea.Reset()
+				m.textarea.Placeholder = "Describe your task or goal..."
+				return m, nil
 			}
 		}
 
@@ -289,7 +330,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dirlist, cmd = m.dirlist.Update(msg)
 	case modeList, modeUTCP:
 		m.list, cmd = m.list.Update(msg)
-	case modePrompt, modeUTCPArgs, modeChat:
+	case modePrompt, modeUTCPArgs, modeChat, modeSession, modeSwarm:
 		m.textarea, cmd = m.textarea.Update(msg)
 		if m.mode == modeChat {
 			var vpCmd tea.Cmd

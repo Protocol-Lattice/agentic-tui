@@ -107,7 +107,7 @@ func (m *model) runRefactorWorkflow(goal string) error {
 	ctxRef, cancel := context.WithTimeout(m.ctx, 10*time.Minute)
 	defer cancel()
 
-	resp, err := m.agent.Generate(ctxRef, "refactor", fullPrompt)
+	resp, err := m.agent.Generate(ctxRef, m.sessionID, fullPrompt)
 	if err != nil {
 		return err
 	}

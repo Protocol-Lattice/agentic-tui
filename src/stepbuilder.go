@@ -135,9 +135,9 @@ func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
 	prompt.WriteString("\n\n---\nGOAL:\n")
 	prompt.WriteString(userGoal)
 
-	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	raw, err := m.agent.GenerateWithFiles(m.ctx, m.sessionID, prompt.String(), attachments)
 	if err != nil {
-		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		raw, err = m.agent.Generate(m.ctx, m.sessionID, prompt.String())
 		if err != nil {
 			return nil, err
 		}
@@ -188,9 +188,9 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) {
 	prompt.WriteString("\nIf you output anything other than JSON, the program will fail. Output must begin with '['.\n")
 
 	// Run with fallback to non-file call
-	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	raw, err := m.agent.GenerateWithFiles(m.ctx, m.sessionID, prompt.String(), attachments)
 	if err != nil {
-		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		raw, err = m.agent.Generate(m.ctx, m.sessionID, prompt.String())
 		if err != nil {
 			return nil, err
 		}
@@ -310,9 +310,9 @@ func (m *model) runStepBuilderPhase(progCh chan<- stepBuildProgressMsg, subgoal 
 			sub.WriteString(fmt.Sprintf("%s — %s\n", f.Path, f.Goal))
 			sub.WriteString("\nFollow OUTPUT CONTRACT: short plan → one fenced file block.")
 
-			res, err := m.agent.GenerateWithFiles(m.ctx, "1", sub.String(), attachments)
+			res, err := m.agent.GenerateWithFiles(m.ctx, m.sessionID, sub.String(), attachments)
 			if err != nil {
-				res, err = m.agent.Generate(m.ctx, "1", sub.String())
+				res, err = m.agent.Generate(m.ctx, m.sessionID, sub.String())
 				if err != nil {
 					results <- fmt.Sprintf("  ❌ failed to build %s: %v\n", f.Name, err)
 					return
@@ -379,9 +379,9 @@ func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
 	prompt.WriteString("\n---\nPHASE: " + phase.Name + " — " + phase.Goal + "\n")
 	prompt.WriteString("Return ONLY valid JSON, no prose.\n")
 
-	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	raw, err := m.agent.GenerateWithFiles(m.ctx, m.sessionID, prompt.String(), attachments)
 	if err != nil {
-		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		raw, err = m.agent.Generate(m.ctx, m.sessionID, prompt.String())
 		if err != nil {
 			return nil, err
 		}

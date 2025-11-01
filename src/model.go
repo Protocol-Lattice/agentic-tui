@@ -34,6 +34,8 @@ const (
 	modeUTCPArgs
 	modeStepBuild
 	modeRefactor
+	modeSession
+	modeSwarm
 )
 
 const logo = `
@@ -114,6 +116,8 @@ type model struct {
 	contextFiles int
 	contextBytes int64
 
+	sessionID         string
+	sharedSpaces      []string
 	transcriptPath    string
 	lastTranscriptSig string
 	syncInterval      time.Duration
@@ -185,6 +189,7 @@ func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 		spinner:      s,
 		style:        st,
 		syncInterval: time.Second,
+		sessionID:    "default",
 	}
 
 	m.setupTranscriptStore()

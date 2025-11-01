@@ -3,6 +3,7 @@ package src
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -39,6 +40,10 @@ func (m *model) viewBody() string {
 		return m.viewThinking()
 	case modeResult:
 		return m.viewResult()
+	case modeSession:
+		return m.viewSession()
+	case modeSwarm:
+		return m.viewSwarm()
 	default:
 		return ""
 	}
@@ -47,7 +52,7 @@ func (m *model) viewBody() string {
 func (m *model) viewFooter() string {
 	help := "ctrl+c: quit"
 	if m.mode == modeChat {
-		help += " | ctrl+d: change directory" // This is now handled by the modeDir case
+		help += " | ctrl+d: dir | ctrl+s: session | ctrl+w: swarm"
 	}
 	if m.mode == modeDir {
 		help += " | enter: select | ←/↑/↓/→: navigate"
@@ -69,14 +74,22 @@ func (m *model) viewList() string {
 }
 
 func (m *model) viewChat() string {
+	// Build swarm/session status
+	var statusItems []string
+	statusItems = append(statusItems, m.style.status.Render(fmt.Sprintf("SESSION: %s", m.sessionID)))
+	if len(m.sharedSpaces) > 0 {
+		statusItems = append(statusItems, m.style.status.Render(fmt.Sprintf("SWARM: %s", strings.Join(m.sharedSpaces, ", "))))
+	}
+	statusItems = append(statusItems, m.style.statusRight.Render(fmt.Sprintf("CTX: %d files (%s)", m.contextFiles, HumanSize(m.contextBytes))))
+
 	// Status bar for the viewport
-	status := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.style.status.Render(m.selected.name),
-		m.style.statusRight.Render(fmt.Sprintf("CTX: %d files (%s)", m.contextFiles, HumanSize(m.contextBytes))),
-	)
+	status := lipgloss.JoinHorizontal(lipgloss.Top, statusItems...)
 
 	// Main chat view with a border
 	metaLines := []string{m.style.subtitle.Render(fmt.Sprintf("Working Directory: %s", m.working))}
+	if m.selected.name != "" {
+		metaLines = append(metaLines, m.style.subtle.Render(fmt.Sprintf("Agent: %s", m.selected.name)))
+	}
 	if m.transcriptPath != "" {
 		rel := m.transcriptPath
 		if r, err := filepath.Rel(m.working, m.transcriptPath); err == nil {
@@ -106,4 +119,22 @@ func (m *model) viewResult() string {
 	// This view is now effectively deprecated in favor of the unified chat view.
 	// We keep it for any legacy paths that might still use it.
 	return m.output
+}
+
+func (m *model) viewSession() string {
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.style.listHeader.Render("Set Session ID"),
+		m.style.subtle.Render("Changing the session ID isolates conversation history."),
+		m.textarea.View(),
+		m.style.help.Render("enter: confirm | esc: cancel"),
+	)
+}
+
+func (m *model) viewSwarm() string {
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.style.listHeader.Render("Set Swarm Spaces"),
+		m.style.subtle.Render("Set comma-separated shared memory spaces for collaboration."),
+		m.textarea.View(),
+		m.style.help.Render("enter: confirm | esc: cancel"),
+	)
 }
