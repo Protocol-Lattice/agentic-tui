@@ -47,14 +47,21 @@ func (m *model) viewBody() string {
 func (m *model) viewFooter() string {
 	help := "ctrl+c: quit"
 	if m.mode == modeChat {
-		help += " | ctrl+d: change directory"
+		help += " | ctrl+d: change directory" // This is now handled by the modeDir case
+	}
+	if m.mode == modeDir {
+		help += " | enter: select | ←/↑/↓/→: navigate"
 	}
 
 	return m.style.footer.Render(help)
 }
 
 func (m *model) viewDir() string {
-	return m.style.list.Render(m.dirlist.View())
+	// Create a header for the directory view that shows the current path.
+	pathHeader := m.style.subtitle.Render(fmt.Sprintf("Current: %s", m.working))
+	dirView := lipgloss.JoinVertical(lipgloss.Left, pathHeader, m.dirlist.View())
+
+	return m.style.chatContainer.Render(dirView)
 }
 
 func (m *model) viewList() string {

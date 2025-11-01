@@ -48,11 +48,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		chatContainerVPadding := m.style.chatContainer.GetVerticalPadding()
 		chatContainerHPadding := m.style.chatContainer.GetHorizontalPadding()
 		m.width, m.height = msg.Width, msg.Height
-		m.list.SetSize(m.width-10, m.height-12)
-		m.dirlist.SetSize(m.width-10, m.height-12)
-		m.textarea.SetWidth(m.width - chatContainerHPadding - 2)                                                     // -2 for border
-		m.viewport.Width = m.width - chatContainerHPadding - 2                                                       // -2 for border
-		m.viewport.Height = m.height - headerHeight - footerHeight - m.textarea.Height() - chatContainerVPadding - 4 // -4 for subtitle, status, thinking
+		m.list.SetSize(m.width-chatContainerHPadding-2, m.height-headerHeight-footerHeight-chatContainerVPadding-2)
+		m.dirlist.SetSize(m.width-chatContainerHPadding-2, m.height-headerHeight-footerHeight-chatContainerVPadding-4) // -4 for path header
+		m.textarea.SetWidth(m.width - chatContainerHPadding - 2)                                                       // -2 for border
+		m.viewport.Width = m.width - chatContainerHPadding - 2                                                         // -2 for border
+		m.viewport.Height = m.height - headerHeight - footerHeight - m.textarea.Height() - chatContainerVPadding - 4   // -4 for subtitle, status, thinking
 		return m, nil
 
 	case tea.KeyMsg:

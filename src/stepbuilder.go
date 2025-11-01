@@ -8,6 +8,44 @@ import (
 	"sync"
 )
 
+var jsonRe = regexp.MustCompile("(?s)```(?:json[c5]?)?\\s*([{\\[].*?[}\\]])\\s*```")
+
+// extractJSON finds the first JSON object or array in a string,
+// handling optional markdown fences.
+func extractJSON(raw string) []byte {
+	// First, try to find a fenced JSON block.
+	if matches := jsonRe.FindStringSubmatch(raw); len(matches) > 1 {
+		raw = matches[1]
+	} else {
+		// If no fence is found, fall back to finding the first/last bracket.
+		start := strings.IndexAny(raw, "[{")
+		if start == -1 {
+			return nil // No JSON object or array found.
+		}
+
+		end := strings.LastIndexAny(raw, "}]")
+		if end == -1 || end < start {
+			return nil // No valid end found.
+		}
+		raw = raw[start : end+1]
+	}
+
+	// At this point, 'raw' should be our best guess at the JSON string.
+	// Now, sanitize it.
+	jsonStr := strings.TrimSpace(raw)
+
+	// Sanitize the JSON string to remove trailing commas.
+	// Remove trailing comma from arrays: `[...,]` -> `[...]`
+	reArray := regexp.MustCompile(`,\s*\]`)
+	jsonStr = reArray.ReplaceAllString(jsonStr, "]")
+
+	// Remove trailing comma from objects: `{...,}` -> `{...}`
+	reObject := regexp.MustCompile(`,\s*\}`)
+	jsonStr = reObject.ReplaceAllString(jsonStr, "}")
+
+	return []byte(jsonStr)
+}
+
 func (m *model) runStepBuilder(userGoal string) {
 	// Create a channel to stream progress back to the Update loop.
 	progCh := make(chan stepBuildProgressMsg)
@@ -70,7 +108,9 @@ func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
 
 	prompt := strings.Builder{}
 	prompt.WriteString("You are a senior software planner. Generate a JSON array describing the files to be built step-by-step.\n")
-	prompt.WriteString("Format: [{\"name\": \"file name\", \"path\": \"relative path\", \"lang\": \"language\", \"goal\": \"short purpose\"}]\n")
+	prompt.WriteString("Respond with STRICT JSON only: an array of objects, each with keys name, path, lang, goal.\n")
+	prompt.WriteString("No prose, comments, trailing commas, markdown fences, or extra keys. Values are plain strings.\n")
+	prompt.WriteString("Format example: [{\"name\":\"server\",\"path\":\"src/server.go\",\"lang\":\"Go\",\"goal\":\"HTTP handlers\"}].\n")
 	prompt.WriteString("Do not include code, only planning metadata.\n\n")
 	prompt.WriteString("### [WORKSPACE ROOT]\n")
 	prompt.WriteString(m.working + "\n\n")
@@ -86,15 +126,7 @@ func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
 		}
 	}
 
-	// Extract JSON block
-	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
-	matches := re.FindStringSubmatch(raw)
-	var data []byte
-	if len(matches) > 1 {
-		data = []byte(matches[1])
-	} else {
-		data = []byte(strings.TrimSpace(raw))
-	}
+	data := extractJSON(raw)
 
 	var plan []planFile
 	if err := json.Unmarshal(data, &plan); err != nil {
@@ -117,8 +149,9 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) { // Note: T
 
 	prompt := strings.Builder{}
 	prompt.WriteString("Split the GOAL into 3–8 sequential sub-prompts, each focused on one major build area.\n")
-	prompt.WriteString("Return JSON ONLY in this form:\n")
-	prompt.WriteString("[\"sub-goal 1\", \"sub-goal 2\", ...]\n\n")
+	prompt.WriteString("Respond with STRICT JSON only. Produce a single JSON array of strings representing the sub-goals.\n")
+	prompt.WriteString("No prose, comments, trailing commas, markdown fences, or keys. Use straight double quotes.\n")
+	prompt.WriteString("Example: [\"draft schema\", \"implement handlers\", \"write integration tests\"].\n\n")
 	prompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
 	prompt.WriteString(ctxBlock)
 	prompt.WriteString("\n---\nGOAL:\n" + userGoal)
@@ -130,11 +163,7 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) { // Note: T
 			return nil, err
 		}
 	}
-	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
-	data := []byte(strings.TrimSpace(raw))
-	if m := re.FindStringSubmatch(raw); len(m) > 1 {
-		data = []byte(m[1])
-	}
+	data := extractJSON(raw)
 	var subs []string
 	if err := json.Unmarshal(data, &subs); err != nil {
 		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
@@ -254,12 +283,7 @@ func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
 		}
 	}
 
-	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
-	data := []byte(strings.TrimSpace(raw))
-	if m := re.FindStringSubmatch(raw); len(m) > 1 {
-		data = []byte(m[1])
-	}
-
+	data := extractJSON(raw)
 	var files []planFile
 	if err := json.Unmarshal(data, &files); err != nil {
 		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
