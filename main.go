@@ -50,6 +50,7 @@ const (
 	modeResult
 	modeUTCP
 	modeUTCPArgs
+	modeStepBuild
 )
 
 type plugin struct{ name, desc string }
@@ -192,15 +193,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
+
 		case "ctrl+c":
 			return m, tea.Quit
 
 		case "left":
 			if m.mode == modeDir {
 				parent := filepath.Dir(m.working)
+				// stay within valid hierarchy
 				if parent != "" && parent != m.working {
 					m.working = parent
-					m.dirlist.SetItems(loadDirs(m.working))
+					items := loadDirs(m.working)
+					m.dirlist.SetItems(items)
+					m.dirlist.Select(0)
 				}
 				return m, nil
 			}
@@ -237,38 +242,66 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
-			if m.mode == modePrompt {
+			switch m.mode {
+			case modePrompt, modeResult, modeUTCPArgs:
 				m.mode = modeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
-				return m, nil
-			}
-			if m.mode == modeUTCPArgs {
-				m.mode = modeUTCP
-				return m, nil
-			}
-			if m.mode == modeResult {
+			case modeUTCP:
 				m.mode = modeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
-				return m, nil
 			}
 			return m, nil
 
 		case "enter":
 			switch m.mode {
+
 			case modeDir:
-				if i, ok := m.dirlist.SelectedItem().(dirItem); ok {
-					info, err := os.Stat(i.path)
-					if err == nil && info.IsDir() {
-						m.history = append(m.history, i.path)
-						m.working = i.path
-						m.dirlist.SetItems(loadDirs(i.path))
-						return m, nil
-					}
+				item, ok := m.dirlist.SelectedItem().(dirItem)
+				if !ok {
+					return m, nil
 				}
+
+				name := item.name
+
+				// --- Go up one level ---
+				if name == "../" {
+					parent := filepath.Dir(m.working)
+					if parent != "" && parent != m.working {
+						m.working = parent
+						items := loadDirs(m.working)
+						m.dirlist.SetItems(items)
+						m.dirlist.Select(0)
+					}
+					return m, nil
+				}
+
+				// --- Enter a subfolder ---
+				info, err := os.Stat(item.path)
+				if err == nil && info.IsDir() {
+					m.working = item.path
+					items := loadDirs(m.working)
+
+					// Always prepend "../" for navigation consistency
+					if m.working != "/" {
+						items = append([]list.Item{dirItem{name: "../", path: filepath.Dir(m.working)}}, items...)
+					}
+					if len(items) == 1 { // Only "../" → empty folder
+						items = append(items, dirItem{name: "(empty)", path: m.working})
+					}
+
+					m.dirlist.SetItems(items)
+					m.dirlist.ResetSelected()
+					m.dirlist.Select(1) // skip "../"
+					return m, nil
+				}
+
+				// --- Confirm current directory (open next view) ---
 				m.mode = modeList
+				m.list.Title = fmt.Sprintf("📁 %s", filepath.Base(m.working))
+				m.list.SetItems(defaultAgents())
 				return m, nil
 
 			case modeList:
@@ -301,6 +334,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if prompt == "" {
 					return m, nil
 				}
+
 				var args map[string]any
 				if err := json.Unmarshal([]byte(prompt), &args); err != nil {
 					m.output = m.style.error.Render(fmt.Sprintf("Invalid JSON: %v", err))
@@ -346,92 +380,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if raw == "" {
 					return m, nil
 				}
-
-				// Orchestration shortcut: `split: ...`
-				forceSplit := strings.HasPrefix(strings.ToLower(raw), "split:")
-				prompt := strings.TrimSpace(strings.TrimPrefix(raw, "split:"))
-
-				m.prevMode = m.mode
-				m.mode = modeThinking
-				m.output = ""
-				m.thinking = "thinking"
-
-				// Inline UTCP pass-through
-				if strings.HasPrefix(prompt, "@utcp ") {
-					cmd := func() tea.Msg {
-						res, err := m.runUTCPInline(prompt)
-						if err != nil {
-							return generateMsg{"", err}
-						}
-						m.saveCodeBlocks(res)
-						return generateMsg{res, nil}
-					}
-					return m, tea.Batch(cmd, thinkingTick())
-				}
-
-				// Orchestrator pipeline (selected or forced via split:)
-				if m.selected.name == "orchestrator" || forceSplit {
-					cmd := func() tea.Msg {
-						out, err := m.runOrchestrator(prompt)
-						if err != nil {
-							return generateMsg{"", err}
-						}
-						return generateMsg{out, nil}
-					}
-					return m, tea.Batch(cmd, thinkingTick())
-				}
-
-				// Single-shot generate on current agent (architect/coder/reviewer)
-				const (
-					maxFiles      = 300
-					maxTotalBytes = int64(1_200_000)
-					perFileLimit  = int64(80_000)
-				)
-				// Detect language dynamically from the current prompt or goal
-				lang := detectPromptLanguage(prompt)
-
-				ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
-				m.contextFiles, m.contextBytes = nFiles, nBytes
-				attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
-
-				fullPrompt := strings.Builder{}
-				fullPrompt.WriteString("You are Vibe, the coding agent inside a TUI. Use the CODEBASE SNAPSHOT as ground truth. Follow the OUTPUT CONTRACT from your system prompt: start with a short Plan, then emit full files as fenced code blocks (one file per fence), then optional Next steps. Avoid diffs and partials.\n\n")
-				fullPrompt.WriteString("### [WORKSPACE ROOT]\n")
-				fullPrompt.WriteString(m.working + "\n")
-				fullPrompt.WriteString("- Save entrypoints at this exact path by default (e.g., ./main.go).\n")
-				fullPrompt.WriteString("- To override placement for any file, add a top-of-file comment `@path <relative/from-root>`.\n\n")
-				fullPrompt.WriteString(ctxBlock)
-				fullPrompt.WriteString("\n\n---\n### Task\n")
-				fullPrompt.WriteString(prompt)
-
-				cmd := func() tea.Msg {
-
-					res, err := m.agent.GenerateWithFiles(m.ctx, "1", fullPrompt.String(), attachments)
-					if err != nil {
-						fallback, ferr := m.agent.Generate(m.ctx, "1", fullPrompt.String())
-						if ferr != nil {
-							return generateMsg{"", fmt.Errorf("GenerateWithFiles failed: %v; fallback Generate failed: %v", err, ferr)}
-						}
-						m.saveCodeBlocks(fallback)
-						return generateMsg{fallback, nil}
-					}
-					m.saveCodeBlocks(res)
-					return generateMsg{res, nil}
-				}
-				return m, tea.Batch(cmd, thinkingTick())
-
-			case modeResult, modeDone:
-				switch m.prevMode {
-				case modeUTCPArgs, modeUTCP:
-					m.mode = modeUTCP
-					m.list.Title = "UTCP Tools"
-					m.list.SetItems(m.loadUTCPTools())
-				default:
-					m.mode = modeList
-					m.list.Title = "Agents"
-					m.list.SetItems(defaultAgents())
-				}
-				return m, nil
+				return m.runPrompt(raw)
 			}
 		}
 
@@ -462,9 +411,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dirlist, cmd = m.dirlist.Update(msg)
 	case modeList, modeUTCP:
 		m.list, cmd = m.list.Update(msg)
-	case modePrompt:
-		m.textarea, cmd = m.textarea.Update(msg)
-	case modeUTCPArgs:
+	case modePrompt, modeUTCPArgs:
 		m.textarea, cmd = m.textarea.Update(msg)
 	}
 	return m, cmd
@@ -494,6 +441,90 @@ func extractExplicitPath(code string) string {
 		}
 	}
 	return ""
+}
+
+// runPrompt handles agent prompt execution modes inside the TUI.
+// It covers step-build, orchestrator, inline UTCP, and default coding modes.
+func (m *model) runPrompt(raw string) (tea.Model, tea.Cmd) {
+	lower := strings.ToLower(raw)
+
+	m.prevMode = m.mode
+	m.mode = modeThinking
+	m.output = ""
+	m.thinking = "thinking"
+
+	// --- STEP BUILD MODE ---
+	if strings.HasPrefix(lower, "stepbuild:") {
+		prompt := strings.TrimSpace(strings.TrimPrefix(lower, "stepbuild:"))
+		cmd := func() tea.Msg {
+			out, err := m.runStepBuilder(prompt)
+			if err != nil {
+				return generateMsg{"", err}
+			}
+			return generateMsg{out, nil}
+		}
+		return m, tea.Batch(cmd, thinkingTick())
+	}
+
+	// --- ORCHESTRATOR MODE ---
+	if strings.HasPrefix(lower, "split:") || m.selected.name == "orchestrator" {
+		prompt := strings.TrimSpace(strings.TrimPrefix(lower, "split:"))
+		cmd := func() tea.Msg {
+			out, err := m.runOrchestrator(prompt)
+			if err != nil {
+				return generateMsg{"", err}
+			}
+			return generateMsg{out, nil}
+		}
+		return m, tea.Batch(cmd, thinkingTick())
+	}
+
+	// --- INLINE UTCP ---
+	if strings.HasPrefix(raw, "@utcp ") {
+		cmd := func() tea.Msg {
+			res, err := m.runUTCPInline(raw)
+			if err != nil {
+				return generateMsg{"", err}
+			}
+			m.saveCodeBlocks(res)
+			return generateMsg{res, nil}
+		}
+		return m, tea.Batch(cmd, thinkingTick())
+	}
+
+	// --- DEFAULT CODING AGENT ---
+	const (
+		maxFiles      = 300
+		maxTotalBytes = int64(1_200_000)
+		perFileLimit  = int64(80_000)
+	)
+	lang := detectPromptLanguage(raw)
+	ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	m.contextFiles, m.contextBytes = nFiles, nBytes
+	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
+	fullPrompt := strings.Builder{}
+	fullPrompt.WriteString("You are Vibe, the coding agent inside a TUI. Use the CODEBASE SNAPSHOT as ground truth.\n")
+	fullPrompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+	fullPrompt.WriteString(ctxBlock)
+	fullPrompt.WriteString("\n\n---\n### Task\n" + raw)
+
+	cmd := func() tea.Msg {
+		res, err := m.agent.GenerateWithFiles(m.ctx, "1", fullPrompt.String(), attachments)
+		if err != nil {
+			// fallback to plain Generate if files unsupported
+			fallback, ferr := m.agent.Generate(m.ctx, "1", fullPrompt.String())
+			if ferr != nil {
+				return generateMsg{"", fmt.Errorf("GenerateWithFiles failed: %v; fallback Generate failed: %v", err, ferr)}
+			}
+			m.saveCodeBlocks(fallback)
+			return generateMsg{fallback, nil}
+		}
+		m.saveCodeBlocks(res)
+		return generateMsg{res, nil}
+	}
+
+	return m, tea.Batch(cmd, thinkingTick())
 }
 
 // -----------------------------------------------------------------------------
@@ -679,11 +710,11 @@ func loadDirs(path string) []list.Item {
 	}
 	var items []list.Item
 	if path != "/" {
-		items = append(items, dirItem{name: "../", path: filepath.Dir(path)})
+		items = append(items, dirItem{name: "⬆️ ../", path: filepath.Dir(path)})
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			items = append(items, dirItem{name: e.Name() + "/", path: filepath.Join(path, e.Name())})
+			items = append(items, dirItem{name: "📁 " + e.Name() + "/", path: filepath.Join(path, e.Name())})
 		}
 	}
 	if len(items) == 0 {
@@ -2303,5 +2334,249 @@ func collectAttachmentFiles(root string, maxFiles int, maxTotalBytes, perFileLim
 		}
 		total += add
 	}
+	return out
+}
+
+// planFile describes a planned file output
+type planFile struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Lang string `json:"lang"`
+	Goal string `json:"goal"`
+}
+
+// buildPlanningPrompt creates a plan describing the expected file structure
+func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
+	const (
+		maxFiles      = 300
+		maxTotalBytes = int64(1_200_000)
+		perFileLimit  = int64(80_000)
+	)
+
+	lang := detectPromptLanguage(userGoal)
+	ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	m.contextFiles, m.contextBytes = nFiles, nBytes
+	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
+	prompt := strings.Builder{}
+	prompt.WriteString("You are a senior software planner. Generate a JSON array describing the files to be built step-by-step.\n")
+	prompt.WriteString("Format: [{\"name\": \"file name\", \"path\": \"relative path\", \"lang\": \"language\", \"goal\": \"short purpose\"}]\n")
+	prompt.WriteString("Do not include code, only planning metadata.\n\n")
+	prompt.WriteString("### [WORKSPACE ROOT]\n")
+	prompt.WriteString(m.working + "\n\n")
+	prompt.WriteString(ctxBlock)
+	prompt.WriteString("\n\n---\nGOAL:\n")
+	prompt.WriteString(userGoal)
+
+	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	if err != nil {
+		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Extract JSON block
+	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
+	matches := re.FindStringSubmatch(raw)
+	var data []byte
+	if len(matches) > 1 {
+		data = []byte(matches[1])
+	} else {
+		data = []byte(strings.TrimSpace(raw))
+	}
+
+	var plan []planFile
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return nil, fmt.Errorf("invalid plan JSON: %v", err)
+	}
+	return plan, nil
+}
+
+// -----------------------------------------------------------------------------
+// AUTO-SPLITTING STEPBUILDER
+// -----------------------------------------------------------------------------
+
+// buildStepPrompts breaks a large goal into several smaller sub-goals
+func (m *model) buildStepPrompts(userGoal string) ([]string, error) {
+	const (
+		maxFiles      = 300
+		maxTotalBytes = int64(1_200_000)
+		perFileLimit  = int64(80_000)
+	)
+	lang := detectPromptLanguage(userGoal)
+	ctxBlock, _, _ := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
+	prompt := strings.Builder{}
+	prompt.WriteString("You are a senior software planner.\n")
+	prompt.WriteString("Split the GOAL into 3–8 sequential sub-prompts, each focused on one major build area.\n")
+	prompt.WriteString("Return JSON ONLY in this form:\n")
+	prompt.WriteString("[\"sub-goal 1\", \"sub-goal 2\", ...]\n\n")
+	prompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+	prompt.WriteString(ctxBlock)
+	prompt.WriteString("\n---\nGOAL:\n" + userGoal)
+
+	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	if err != nil {
+		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		if err != nil {
+			return nil, err
+		}
+	}
+	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
+	data := []byte(strings.TrimSpace(raw))
+	if m := re.FindStringSubmatch(raw); len(m) > 1 {
+		data = []byte(m[1])
+	}
+	var subs []string
+	if err := json.Unmarshal(data, &subs); err != nil {
+		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
+	}
+	return subs, nil
+}
+
+// runStepBuilderPhase runs one sub-prompt (single phase) through the file-plan + build loop
+func (m *model) runStepBuilderPhase(subgoal string, stepIndex, total int) (string, error) {
+	var log strings.Builder
+	fmt.Fprintf(&log, "⚙️  Step %d/%d — %s\n", stepIndex, total, subgoal)
+
+	// Create file plan for this subgoal
+	phase := stepPhase{Name: fmt.Sprintf("Step %d", stepIndex), Goal: subgoal}
+	files, err := m.buildFilePlan(phase)
+	if err != nil {
+		return "", fmt.Errorf("failed to plan files: %v", err)
+	}
+
+	for j, f := range files {
+		index := fmt.Sprintf("%d.%d", stepIndex, j+1)
+		m.thinking = fmt.Sprintf("building %s — %s", index, f.Name)
+		m.mode = modeThinking
+
+		const (
+			maxFiles      = 300
+			maxTotalBytes = int64(1_200_000)
+			perFileLimit  = int64(80_000)
+		)
+		ctxBlock, _, _ := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
+		attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, f.Lang)
+
+		sub := strings.Builder{}
+		sub.WriteString("You are Vibe, the coding agent inside a TUI.\n")
+		sub.WriteString(fmt.Sprintf("Generate ONLY ONE file for sub-goal '%s': %s\n\n", subgoal, f.Name))
+		sub.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+		sub.WriteString(ctxBlock)
+		sub.WriteString("\n---\nFILE SPEC:\n")
+		sub.WriteString(fmt.Sprintf("%s — %s\n", f.Path, f.Goal))
+		sub.WriteString("\nFollow OUTPUT CONTRACT: short plan → one fenced file block.")
+
+		res, err := m.agent.GenerateWithFiles(m.ctx, "1", sub.String(), attachments)
+		if err != nil {
+			res, err = m.agent.Generate(m.ctx, "1", sub.String())
+			if err != nil {
+				fmt.Fprintf(&log, "❌ failed to build %s: %v\n", f.Name, err)
+				continue
+			}
+		}
+
+		m.saveCodeBlocks(res)
+		fmt.Fprintf(&log, "✅ %s\n", f.Path)
+		tree := buildTree(collectWorkspaceFiles(m.working))
+		fmt.Fprintf(&log, "%s\n\n", tree)
+	}
+	return log.String(), nil
+}
+
+// runStepBuilder now uses sub-prompts automatically
+func (m *model) runStepBuilder(userGoal string) (string, error) {
+	var log strings.Builder
+	fmt.Fprintf(&log, "🧩 Auto StepBuild for GOAL:\n%s\n\n", userGoal)
+
+	subprompts, err := m.buildStepPrompts(userGoal)
+	if err != nil {
+		return "", fmt.Errorf("failed to split goal into sub-prompts: %v", err)
+	}
+
+	fmt.Fprintf(&log, "📋 %d step prompts generated:\n", len(subprompts))
+	for i, s := range subprompts {
+		fmt.Fprintf(&log, "  %d) %s\n", i+1, s)
+	}
+	fmt.Fprintln(&log)
+
+	for i, sub := range subprompts {
+		phaseLog, err := m.runStepBuilderPhase(sub, i+1, len(subprompts))
+		if err != nil {
+			fmt.Fprintf(&log, "⚠️  %v\n", err)
+			continue
+		}
+		log.WriteString(phaseLog)
+	}
+
+	fmt.Fprintln(&log, "🎉 Auto StepBuild complete!")
+	return log.String(), nil
+}
+
+// stepPhase represents a high-level build phase (like a module or layer)
+type stepPhase struct {
+	Name  string     `json:"name"`
+	Goal  string     `json:"goal"`
+	Files []planFile `json:"files,omitempty"`
+}
+
+// buildFilePlan creates the list of files for a given build phase or subgoal
+func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
+	const (
+		maxFiles      = 300
+		maxTotalBytes = int64(1_200_000)
+		perFileLimit  = int64(80_000)
+	)
+
+	lang := detectPromptLanguage(phase.Goal)
+	ctxBlock, _, _ := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
+
+	prompt := strings.Builder{}
+	prompt.WriteString("You are a senior code planner.\n")
+	prompt.WriteString(fmt.Sprintf("For PHASE: %s — %s\n", phase.Name, phase.Goal))
+	prompt.WriteString("Generate a JSON array describing the files to build.\n")
+	prompt.WriteString("[{\"name\":\"...\",\"path\":\"...\",\"lang\":\"...\",\"goal\":\"...\"}]\n\n")
+	prompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+	prompt.WriteString(ctxBlock)
+
+	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
+	if err != nil {
+		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	re := regexp.MustCompile("(?s)```json\\s*(\\[.*?\\])\\s*```")
+	data := []byte(strings.TrimSpace(raw))
+	if m := re.FindStringSubmatch(raw); len(m) > 1 {
+		data = []byte(m[1])
+	}
+
+	var files []planFile
+	if err := json.Unmarshal(data, &files); err != nil {
+		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
+	}
+	return files, nil
+}
+
+// collectWorkspaceFiles scans all allowed files for buildTree
+func collectWorkspaceFiles(root string) []fileEntry {
+	var out []fileEntry
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if allowedFile(p) {
+			rel, _ := filepath.Rel(root, p)
+			st, _ := os.Stat(p)
+			out = append(out, fileEntry{Rel: rel, Abs: p, Size: st.Size()})
+		}
+		return nil
+	})
 	return out
 }
