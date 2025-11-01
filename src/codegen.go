@@ -32,69 +32,73 @@ type fileMeta struct {
 }
 
 func (m *model) saveCodeBlocks(s string) {
-	m.output += "\n---\n"
-	matches := fenceRe.FindAllStringSubmatch(s, -1)
-	if len(matches) == 0 {
-		m.output += m.style.subtle.Render("No code blocks detected.\n")
-		return
-	}
-
-	manifest := make(map[string][]fileMeta)
-
-	for idx, mth := range matches {
-		lang := strings.ToLower(strings.TrimSpace(mth[1]))
-		code := strings.TrimSpace(mth[2])
-		if lang == "" {
-			lang = guessLanguageFromCode(code)
-		}
-		if lang == "" {
-			lang = "txt"
+	m.withCodegenLock(func() {
+		m.output += "\n---\n"
+		matches := fenceRe.FindAllStringSubmatch(s, -1)
+		if len(matches) == 0 {
+			m.output += m.style.subtle.Render("No code blocks detected.\n")
+			m.renderOutput(true)
+			return
 		}
 
-		// 1) Respect explicit @path if provided
-		explicit := extractExplicitPath(code)
-		var filename string
-		var targetDir string
-		pkgName := ""
+		manifest := make(map[string][]fileMeta)
 
-		if explicit != "" {
-			abs := filepath.Join(m.working, explicit)
-			_ = os.MkdirAll(filepath.Dir(abs), 0o755)
-			filename = abs
-			targetDir = filepath.Dir(abs)
-		} else {
-			// 2) Entrypoint safeguard for Go: keep at root
-			if lang == "go" && (strings.Contains(code, "package src") || strings.Contains(code, "func main(")) {
-				targetDir = m.working
-			} else {
-				targetDir, pkgName = m.detectPackageDirectory(lang, code)
+		for idx, mth := range matches {
+			lang := strings.ToLower(strings.TrimSpace(mth[1]))
+			code := strings.TrimSpace(mth[2])
+			if lang == "" {
+				lang = guessLanguageFromCode(code)
 			}
-			_ = os.MkdirAll(targetDir, 0o755)
-			filename = filepath.Join(targetDir, m.guessFilename(lang, code, idx))
+			if lang == "" {
+				lang = "txt"
+			}
+
+			// 1) Respect explicit @path if provided
+			explicit := extractExplicitPath(code)
+			var filename string
+			var targetDir string
+			pkgName := ""
+
+			if explicit != "" {
+				abs := filepath.Join(m.working, explicit)
+				_ = os.MkdirAll(filepath.Dir(abs), 0o755)
+				filename = abs
+				targetDir = filepath.Dir(abs)
+			} else {
+				// 2) Entrypoint safeguard for Go: keep at root
+				if lang == "go" && (strings.Contains(code, "package src") || strings.Contains(code, "func main(")) {
+					targetDir = m.working
+				} else {
+					targetDir, pkgName = m.detectPackageDirectory(lang, code)
+				}
+				_ = os.MkdirAll(targetDir, 0o755)
+				filename = filepath.Join(targetDir, m.guessFilename(lang, code, idx))
+			}
+
+			if err := os.WriteFile(filename, []byte(code+"\n"), 0o644); err != nil {
+				m.output += m.style.error.Render(fmt.Sprintf("❌ failed to save %s: %v\n", filename, err))
+				continue
+			}
+
+			key := lang
+			if pkgName != "" {
+				key = pkgName
+			}
+			manifest[key] = append(manifest[key], fileMeta{Name: filepath.Base(filename), Path: filename})
+			m.output += m.style.success.Render(fmt.Sprintf("💾 saved %s\n", filename))
 		}
 
-		if err := os.WriteFile(filename, []byte(code+"\n"), 0o644); err != nil {
-			m.output += m.style.error.Render(fmt.Sprintf("❌ failed to save %s: %v\n", filename, err))
-			continue
+		for _, files := range manifest {
+			lang := guessPrimaryLang(files)
+			m.addImports(lang, files)
 		}
-
-		key := lang
-		if pkgName != "" {
-			key = pkgName
+		if err := NormalizeImports(m.working); err != nil {
+			m.output += m.style.subtle.Render(
+				fmt.Sprintf("⚠ import normalize: %v\n", err),
+			)
 		}
-		manifest[key] = append(manifest[key], fileMeta{Name: filepath.Base(filename), Path: filename})
-		m.output += m.style.success.Render(fmt.Sprintf("💾 saved %s\n", filename))
-	}
-
-	for _, files := range manifest {
-		lang := guessPrimaryLang(files)
-		m.addImports(lang, files)
-	}
-	if err := NormalizeImports(m.working); err != nil {
-		m.output += m.style.subtle.Render(
-			fmt.Sprintf("⚠ import normalize: %v\n", err),
-		)
-	}
+		m.renderOutput(true)
+	})
 }
 
 // Universal package/module detector for ANY programming language

@@ -18,8 +18,7 @@ func (m *model) runPrompt(raw string) (tea.Model, tea.Cmd) {
 	// Add user prompt to history
 	m.output += m.style.accent.Render("You:") + "\n" + raw + "\n\n"
 	m.output += m.style.thinking.Render("Lattice:") + "\n" // Add agent header before thinking
-	m.viewport.SetContent(m.output)
-	m.viewport.GotoBottom()
+	m.renderOutput(true)
 	m.textarea.Reset()
 
 	m.isThinking = true
@@ -67,6 +66,7 @@ func (m *model) runPrompt(raw string) (tea.Model, tea.Cmd) {
 // and applies all returned file replacements.
 func (m *model) runRefactorWorkflow(goal string) error {
 	m.output = fmt.Sprintf("♻️ Refactoring codebase: %s\n\n", goal)
+	m.renderOutput(true)
 
 	files := collectWorkspaceFiles(m.working)
 	if len(files) == 0 {

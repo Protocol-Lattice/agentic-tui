@@ -2,6 +2,7 @@ package src
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,32 @@ import (
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	case transcriptTickMsg:
+		var cmds []tea.Cmd
+		if cmd := m.readTranscriptCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if next := m.scheduleTranscriptTick(); next != nil {
+			cmds = append(cmds, next)
+		}
+		return m, tea.Batch(cmds...)
+
+	case transcriptSyncMsg:
+		if msg.err != nil {
+			if errors.Is(msg.err, os.ErrNotExist) {
+				m.persistTranscript()
+			}
+			return m, nil
+		}
+		if msg.checksum != m.lastTranscriptSig {
+			m.mu.Lock()
+			m.output = msg.content
+			m.lastTranscriptSig = msg.checksum
+			m.mu.Unlock()
+			m.renderOutput(false)
+		}
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		headerHeight := lipgloss.Height(m.viewHeader())
@@ -166,6 +193,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var args map[string]any
 				if err := json.Unmarshal([]byte(prompt), &args); err != nil {
 					m.output = m.style.error.Render(fmt.Sprintf("Invalid JSON: %v", err))
+					m.renderOutput(true)
 					m.mode = modeResult
 					return m, nil
 				}
@@ -230,15 +258,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.output += "\n"
 			}
 		}
-		m.viewport.SetContent(m.output)
-		m.viewport.GotoBottom()
+		m.renderOutput(true)
 		return m, nil
 
 	// --- Handle real-time progress from step-builder ---
 	case stepBuildProgressMsg:
 		m.output += msg.log // Append new progress to the output.
-		m.viewport.SetContent(m.output)
-		m.viewport.GotoBottom()
+		m.renderOutput(true)
 		return m, nil
 
 	case stepBuildCompleteMsg:
@@ -253,8 +279,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.finalLog != "" {
 			m.output = msg.finalLog
 		}
-		m.viewport.SetContent(m.output)
-		m.viewport.GotoBottom()
+		m.renderOutput(true)
 		// No further tick needed, the process is complete.
 		return m, nil
 	}

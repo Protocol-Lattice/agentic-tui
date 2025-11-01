@@ -3,7 +3,11 @@ package src
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -109,6 +113,12 @@ type model struct {
 	// Context snapshot stats (set on each run)
 	contextFiles int
 	contextBytes int64
+
+	transcriptPath    string
+	lastTranscriptSig string
+	syncInterval      time.Duration
+	lockDir           string
+	codegenLocal      sync.Mutex
 }
 
 type styles struct {
@@ -161,20 +171,71 @@ func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 	s.Spinner = spinner.Line
 	s.Style = st.thinking
 
-	return &model{
-		ctx:      ctx,
-		agent:    a,
-		utcp:     u,
-		working:  startDir,
-		history:  []string{startDir},
-		mode:     modeDir,
-		list:     l,
-		dirlist:  dirList,
-		textarea: ta,
-		viewport: vp,
-		spinner:  s,
-		style:    st,
+	m := &model{
+		ctx:          ctx,
+		agent:        a,
+		utcp:         u,
+		working:      startDir,
+		history:      []string{startDir},
+		mode:         modeDir,
+		list:         l,
+		dirlist:      dirList,
+		textarea:     ta,
+		viewport:     vp,
+		spinner:      s,
+		style:        st,
+		syncInterval: time.Second,
 	}
+
+	m.setupTranscriptStore()
+	return m
+}
+
+func (m *model) setupTranscriptStore() {
+	sharedDir := filepath.Join(m.working, ".lattice")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		return
+	}
+	m.transcriptPath = filepath.Join(sharedDir, "chat.log")
+	if lockRoot := filepath.Join(sharedDir, "locks"); os.MkdirAll(lockRoot, 0o755) == nil {
+		m.lockDir = lockRoot
+	}
+
+	if data, err := os.ReadFile(m.transcriptPath); err == nil {
+		m.output = string(data)
+		m.lastTranscriptSig = hashString(m.output)
+		if strings.TrimSpace(m.output) == "" {
+			m.output = "Welcome to Lattice Code! Describe your task to get started."
+		}
+		m.renderOutput(false)
+		return
+	}
+
+	if m.output == "" {
+		m.output = "Welcome to Lattice Code! Describe your task to get started."
+	}
+	m.persistTranscript()
+	m.renderOutput(false)
+}
+
+func (m *model) renderOutput(sync bool) {
+	m.viewport.SetContent(m.output)
+	m.viewport.GotoBottom()
+	if sync {
+		m.persistTranscript()
+	}
+}
+
+func (m *model) persistTranscript() {
+	if m.transcriptPath == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := os.WriteFile(m.transcriptPath, []byte(m.output), 0o644); err != nil {
+		return
+	}
+	m.lastTranscriptSig = hashString(m.output)
 }
 
 func newStyles() styles {
@@ -262,4 +323,6 @@ func defaultAgents() []list.Item {
 	}
 }
 
-func (m *model) Init() tea.Cmd { return nil }
+func (m *model) Init() tea.Cmd {
+	return m.scheduleTranscriptTick()
+}

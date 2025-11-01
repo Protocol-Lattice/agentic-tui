@@ -2,6 +2,7 @@ package src
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -68,8 +69,16 @@ func (m *model) viewChat() string {
 	)
 
 	// Main chat view with a border
+	metaLines := []string{m.style.subtitle.Render(fmt.Sprintf("Working Directory: %s", m.working))}
+	if m.transcriptPath != "" {
+		rel := m.transcriptPath
+		if r, err := filepath.Rel(m.working, m.transcriptPath); err == nil {
+			rel = r
+		}
+		metaLines = append(metaLines, m.style.subtle.Render(fmt.Sprintf("Shared chat log: %s", rel)))
+	}
 	chatView := lipgloss.JoinVertical(lipgloss.Left,
-		m.style.subtitle.Render(fmt.Sprintf("Working Directory: %s", m.working)),
+		lipgloss.JoinVertical(lipgloss.Left, metaLines...),
 		m.viewport.View(),
 		status,
 		m.viewThinking(),
