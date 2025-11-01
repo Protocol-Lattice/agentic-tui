@@ -1,4 +1,4 @@
-module main
+module github.com/Protocol-Lattice/lattice-code
 
 go 1.25.0
 

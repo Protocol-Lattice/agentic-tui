@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	. "main/src"
+	. "github.com/Protocol-Lattice/lattice-code/src"
 
 	tea "github.com/charmbracelet/bubbletea"
 
