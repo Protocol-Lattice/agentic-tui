@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -155,26 +156,38 @@ func (m *model) buildPlanningPrompt(userGoal string) ([]planFile, error) {
 }
 
 // buildStepPrompts breaks a large goal into several smaller sub-goals
-func (m *model) buildStepPrompts(userGoal string) ([]string, error) { // Note: This function is long, but its logic is self-contained.
+func (m *model) buildStepPrompts(userGoal string) ([]string, error) {
 	const (
 		maxFiles      = 300
 		maxTotalBytes = int64(1_200_000)
 		perFileLimit  = int64(80_000)
 	)
+
 	lang := detectPromptLanguage(userGoal)
 	ctxBlock, nFiles, nBytes := buildCodebaseContext(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
 	m.contextFiles, m.contextBytes = nFiles, nBytes
 	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
 
+	// 🧠 New stricter prompt
 	prompt := strings.Builder{}
-	prompt.WriteString("Split the GOAL into 3–8 sequential sub-prompts, each focused on one major build area.\n")
-	prompt.WriteString("Respond with STRICT JSON only. Produce a single JSON array of strings representing the sub-goals.\n")
-	prompt.WriteString("No prose, comments, trailing commas, markdown fences, or keys. Use straight double quotes.\n")
-	prompt.WriteString("Example: [\"draft schema\", \"implement handlers\", \"write integration tests\"].\n\n")
-	prompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
-	prompt.WriteString(ctxBlock)
-	prompt.WriteString("\n---\nGOAL:\n" + userGoal)
+	prompt.WriteString("You are an expert software project planner inside a TUI called Lattice Code.\n")
+	prompt.WriteString("Split the GOAL into 3–8 clear development phases.\n\n")
 
+	prompt.WriteString("### STRICT OUTPUT FORMAT ###\n")
+	prompt.WriteString("Return *only one* valid JSON array of strings.\n")
+	prompt.WriteString("No markdown, prose, comments, or keys.\n")
+	prompt.WriteString("Start directly with '[' and end with ']'.\n")
+	prompt.WriteString("Example:\n[\"plan data model\", \"build API\", \"add UI\", \"test & deploy\"]\n\n")
+	prompt.WriteString("If you are uncertain, return an empty array [] — never explain.\n\n")
+
+	prompt.WriteString("### CONTEXT ###\nWorkspace Root: " + m.working + "\n\n")
+	prompt.WriteString(ctxBlock)
+	prompt.WriteString("\n---\nGOAL:\n" + userGoal + "\n\n")
+	prompt.WriteString("Return ONLY valid JSON, no text before or after. Start with '[' and end with ']'.\n")
+	prompt.WriteString("If you cannot comply, return []. No prose.\n")
+	prompt.WriteString("\nIf you output anything other than JSON, the program will fail. Output must begin with '['.\n")
+
+	// Run with fallback to non-file call
 	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
 	if err != nil {
 		raw, err = m.agent.Generate(m.ctx, "1", prompt.String())
@@ -182,15 +195,75 @@ func (m *model) buildStepPrompts(userGoal string) ([]string, error) { // Note: T
 			return nil, err
 		}
 	}
-	data, err := extractJSON(raw)
+
+	data, err := extractJSONStrict(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
 	}
+
 	var subs []string
 	if err := json.Unmarshal(data, &subs); err != nil {
 		return nil, fmt.Errorf("invalid stepbuild prompt JSON: %v", err)
 	}
 	return subs, nil
+}
+
+func extractJSONStrict(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("empty response")
+	}
+
+	// 1️⃣ Remove markdown fences if present
+	reFence := regexp.MustCompile("(?is)```(?:json|JSON)?\\s*([\\s\\S]*?)```")
+
+	if m := reFence.FindStringSubmatch(raw); len(m) > 1 {
+		raw = strings.TrimSpace(m[1])
+	}
+
+	// 2️⃣ Normalize common junk: remove leading '{' or trailing '}'
+	raw = strings.TrimPrefix(raw, "{")
+	raw = strings.TrimSuffix(raw, "}")
+	raw = strings.TrimSpace(raw)
+
+	// 3️⃣ Replace single quotes and fix trailing commas
+	raw = strings.ReplaceAll(raw, "'", `"`)
+	raw = trailingArrayComma.ReplaceAllString(raw, "]")
+	raw = trailingObjectComma.ReplaceAllString(raw, "}")
+	raw = strings.TrimSpace(raw)
+
+	// 4️⃣ Try direct JSON parse (array or object)
+	if json.Valid([]byte(raw)) {
+		return []byte(raw), nil
+	}
+
+	// 5️⃣ Attempt to extract the first JSON-looking array or object substring
+	reAny := regexp.MustCompile(`(\[[\s\S]*?\]|\{[\s\S]*?\})`)
+	if match := reAny.FindString(raw); match != "" && json.Valid([]byte(match)) {
+		return []byte(match), nil
+	}
+
+	// 6️⃣ Fallback: build JSON array from bullet/numbered list
+	lines := strings.Split(raw, "\n")
+	var items []string
+	for _, l := range lines {
+		l = strings.TrimSpace(strings.TrimLeft(l, "-•0123456789. "))
+		if l == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(l), "step") {
+			continue
+		}
+		if len(l) > 0 && len(l) < 120 {
+			items = append(items, l)
+		}
+	}
+	if len(items) > 0 {
+		out, _ := json.Marshal(items)
+		return out, nil
+	}
+
+	return nil, errors.New("malformed JSON in response")
 }
 
 // runStepBuilderPhase runs one sub-prompt (a single phase) through the file-plan and build loop.
@@ -290,12 +363,21 @@ func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
 	attachments := collectAttachmentFiles(m.working, maxFiles, maxTotalBytes, perFileLimit, lang)
 
 	prompt := strings.Builder{}
-	prompt.WriteString("You are a senior code planner.\n")
-	prompt.WriteString(fmt.Sprintf("For PHASE: %s — %s\n", phase.Name, phase.Goal))
-	prompt.WriteString("Generate a JSON array describing the files to build.\n")
-	prompt.WriteString("[{\"name\":\"...\",\"path\":\"...\",\"lang\":\"...\",\"goal\":\"...\"}]\n\n")
-	prompt.WriteString("### [WORKSPACE ROOT]\n" + m.working + "\n\n")
+	prompt.WriteString("You are a senior software planner inside Lattice Code.\n")
+	prompt.WriteString("For this PHASE, plan which files must be generated next.\n\n")
+	prompt.WriteString("### STRICT OUTPUT FORMAT ###\n")
+	prompt.WriteString("Return *only* a valid JSON array of objects.\n")
+	prompt.WriteString("Each object must include keys: name, path, lang, goal (all strings).\n")
+	prompt.WriteString("No markdown, prose, comments, or explanations.\n")
+	prompt.WriteString("Start with '[' and end with ']'.\n")
+	prompt.WriteString("Example:\n")
+	prompt.WriteString("[{\"name\":\"server\",\"path\":\"src/server.go\",\"lang\":\"Go\",\"goal\":\"HTTP handlers\"}]\n\n")
+	prompt.WriteString("If you are uncertain, return [].\n\n")
+	prompt.WriteString("### CONTEXT ###\n")
+	prompt.WriteString("Workspace Root: " + m.working + "\n\n")
 	prompt.WriteString(ctxBlock)
+	prompt.WriteString("\n---\nPHASE: " + phase.Name + " — " + phase.Goal + "\n")
+	prompt.WriteString("Return ONLY valid JSON, no prose.\n")
 
 	raw, err := m.agent.GenerateWithFiles(m.ctx, "1", prompt.String(), attachments)
 	if err != nil {
@@ -305,13 +387,84 @@ func (m *model) buildFilePlan(phase stepPhase) ([]planFile, error) {
 		}
 	}
 
-	data, err := extractJSON(raw)
+	data, err := extractJSONStrict(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
 	}
+
+	// --- Try primary format: []planFile ---
 	var files []planFile
-	if err := json.Unmarshal(data, &files); err != nil {
-		return nil, fmt.Errorf("invalid file plan JSON: %v", err)
+	if err := json.Unmarshal(data, &files); err == nil {
+		return normalizePlanFiles(files, lang, phase.Goal), nil
 	}
-	return files, nil
+
+	// --- Fallback 1: single planFile object ---
+	var single planFile
+	if err := json.Unmarshal(data, &single); err == nil {
+		return normalizePlanFiles([]planFile{single}, lang, phase.Goal), nil
+	}
+
+	// --- Fallback 2: array of strings ---
+	var names []string
+	if err := json.Unmarshal(data, &names); err == nil {
+		out := make([]planFile, 0, len(names))
+		for _, n := range names {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			out = append(out, planFile{
+				Name: filepath.Base(n),
+				Path: filepath.Join("src", sanitizeFilename(n)+extFor(lang)),
+				Lang: lang,
+				Goal: phase.Goal,
+			})
+		}
+		return normalizePlanFiles(out, lang, phase.Goal), nil
+	}
+
+	// --- Fallback 3: object wrapper like {"files":[...]} ---
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err == nil {
+		var out []planFile
+		for _, v := range wrapper {
+			b, _ := json.Marshal(v)
+			var inner []planFile
+			if json.Unmarshal(b, &inner) == nil {
+				out = append(out, inner...)
+				continue
+			}
+			var innerNames []string
+			if json.Unmarshal(b, &innerNames) == nil {
+				for _, n := range innerNames {
+					out = append(out, planFile{
+						Name: filepath.Base(n),
+						Path: filepath.Join("src", sanitizeFilename(n)+extFor(lang)),
+						Lang: lang,
+						Goal: phase.Goal,
+					})
+				}
+			}
+		}
+		if len(out) > 0 {
+			return normalizePlanFiles(out, lang, phase.Goal), nil
+		}
+	}
+
+	return nil, fmt.Errorf("invalid file plan JSON: could not parse any valid format\nRaw: %s", trim(raw, 200))
+}
+
+func normalizePlanFiles(files []planFile, lang, goal string) []planFile {
+	for i := range files {
+		if files[i].Path == "" {
+			files[i].Path = filepath.Join("src", sanitizeFilename(files[i].Name)+extFor(lang))
+		}
+		if files[i].Lang == "" {
+			files[i].Lang = lang
+		}
+		if files[i].Goal == "" {
+			files[i].Goal = goal
+		}
+	}
+	return files
 }
