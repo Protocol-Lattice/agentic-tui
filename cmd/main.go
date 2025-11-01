@@ -38,7 +38,7 @@ func buildAgent(ctx context.Context) (*agent.Agent, error) {
 			modules.InQdrantMemory(100000, *qdrantURL, *qdrantCollection, memory.AutoEmbedder(), &memOpts),
 
 			adkmodules.NewModelModule("gemini", func(_ context.Context) (models.Agent, error) {
-				return models.NewOllamaLLM("gemma3:1b", "Universal code generator")
+				return models.NewGeminiLLM(ctx, "gemini-2.5-pro", "Universal code generator")
 			}),
 			adkmodules.NewToolModule("essentials",
 				adkmodules.StaticToolProvider([]agent.Tool{&tools.EchoTool{}}, nil),

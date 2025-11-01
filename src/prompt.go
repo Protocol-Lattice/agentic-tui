@@ -16,8 +16,15 @@ import (
 // It covers step-build, orchestrator, inline UTCP, and default coding modes.
 func (m *model) runPrompt(raw string) (tea.Model, tea.Cmd) {
 	// Add user prompt to history
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		// nothing to do — don't modify UI or start goroutines
+		return m, nil
+	}
+
+	// now it's safe to append to output and start thinking
 	m.output += m.style.accent.Render("You:") + "\n" + raw + "\n\n"
-	m.output += m.style.thinking.Render("Lattice:") + "\n" // Add agent header before thinking
+	m.output += m.style.thinking.Render("Lattice:") + "\n"
 	m.renderOutput(true)
 	m.textarea.Reset()
 

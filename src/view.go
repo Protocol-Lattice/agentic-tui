@@ -61,7 +61,7 @@ func (m *model) viewDir() string {
 	pathHeader := m.style.subtitle.Render(fmt.Sprintf("Current: %s", m.working))
 	dirView := lipgloss.JoinVertical(lipgloss.Left, pathHeader, m.dirlist.View())
 
-	return m.style.chatContainer.Render(dirView)
+	return dirView
 }
 
 func (m *model) viewList() string {
