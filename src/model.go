@@ -122,6 +122,8 @@ type model struct {
 	lastTranscriptSig string
 	syncInterval      time.Duration
 	lockDir           string
+	plannerQueue      chan string // new: queued logs for planner output
+
 }
 
 type styles struct {
@@ -194,6 +196,8 @@ func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 		style:        st,
 		syncInterval: time.Second,
 		sessionID:    sessionID,
+		plannerQueue: make(chan string, 100), // <-- add this
+
 	}
 
 	return m
