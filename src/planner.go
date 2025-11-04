@@ -35,8 +35,7 @@ func stripSystemPrompt(s string) string {
 	lines := strings.Split(s, "\n")
 	var out []string
 	for _, l := range lines {
-		if strings.Contains(strings.ToLower(l), "system prompt") ||
-			strings.Contains(strings.ToLower(l), "you are chatgpt") {
+		if strings.Contains(strings.ToLower(l), "system prompt") {
 			continue
 		}
 		out = append(out, l)
