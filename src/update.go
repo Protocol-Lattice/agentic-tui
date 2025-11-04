@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Protocol-Lattice/go-agent/src/models"
@@ -20,6 +21,8 @@ type codegenStatusMsg struct {
 	msg string
 	err error
 }
+
+type plannerTickMsg struct{}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -205,7 +208,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				// Handle direct UTCP calls from chat
+				m.textarea.Reset()
+				m.output += m.style.accent.Render("You: ") + raw + "\n\n"
+				m.renderOutput(true)
+				m.isThinking = true
+				m.thinking = "thinking"
+
+				// --- 1️⃣ UTCP command flow ---
 				if strings.HasPrefix(raw, "@utcp ") {
 					jsonStr := strings.TrimSpace(strings.TrimPrefix(raw, "@utcp "))
 					if jsonStr == "" {
@@ -234,7 +243,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.isThinking = true
 					m.thinking = "calling UTCP tool"
-					m.textarea.Reset()
 
 					cmd := func() tea.Msg {
 						if payload.Stream {
@@ -242,10 +250,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m.callUTCP(payload.Tool, payload.Args)
 					}
+
+					// stay in chat
 					return m, tea.Batch(cmd, m.spinner.Tick)
-				} else {
-					return m.runPrompt(raw)
 				}
+
+				// --- 2️⃣ Default: always run planner after prompt ---
+				go RunPlanner(m.ctx, m.agent, m.working, raw, m)
+
+				// start reading planner queue
+				return m, tea.Batch(
+					tea.Tick(time.Millisecond*100, func(time.Time) tea.Msg { return plannerTickMsg{} }),
+					m.spinner.Tick,
+				)
 
 			case modeSession:
 				newID := strings.TrimSpace(m.textarea.Value())
@@ -273,8 +290,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	// --- Handle final message from a generation task ---
-	case generateMsg: // This is the final message from a generation task
+	case generateMsg:
 		m.isThinking = false
 		if msg.err != nil {
 			m.output += m.style.error.Render(fmt.Sprintf("❌ %v\n", msg.err))
@@ -284,31 +300,47 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.output += "\n"
 			}
 		}
-		m.refreshContext() // Refresh context after generation and file I/O
+		m.refreshContext()
 		m.renderOutput(true)
 		return m, nil
 
-	// --- Handle real-time progress from step-builder ---
+	// --- 🧭 Planner Queue Integration ---
 	case stepBuildProgressMsg:
-		m.output += msg.log // Append new progress to the output.
-		m.renderOutput(true)
+		// deprecated direct streaming — replaced with queued approach
 		return m, nil
 
 	case stepBuildCompleteMsg:
 		m.isThinking = false
 		m.thinking = ""
-		// If finalLog is empty, it means the process finished but we don't want to overwrite the streamed output.
-		if msg.err != nil {
-			if !strings.HasSuffix(m.output, "\n") {
-				m.output += "\n"
-			}
-			m.output += m.style.error.Render(fmt.Sprintf("❌ %v\n", msg.err))
-		} else if msg.finalLog != "" {
-			m.output = msg.finalLog
-		}
 		m.renderOutput(true)
-		// No further tick needed, the process is complete.
 		return m, nil
+
+		// New queue flusher — called repeatedly while plannerQueue has messages
+		// Continuously flush plannerQueue -> chat view
+	// --- 🧭 Planner Live Queue Flusher ---
+	case plannerTickMsg:
+		drained := false
+		for {
+			select {
+			case line, ok := <-m.plannerQueue:
+				if !ok {
+					// channel closed, stop ticking
+					m.isThinking = false
+					m.thinking = ""
+					m.renderOutput(true)
+					return m, nil
+				}
+				drained = true
+				m.output += line
+			default:
+				// queue temporarily empty
+				if drained {
+					m.renderOutput(true)
+				}
+				// schedule next check
+				return m, tea.Tick(time.Millisecond*100, func(time.Time) tea.Msg { return plannerTickMsg{} })
+			}
+		}
 
 	case codegenStatusMsg:
 		if msg.err != nil {
@@ -378,9 +410,10 @@ func (m *model) callUTCPStream(toolName string, args map[string]any) tea.Msg {
 	return generateMsg{out.String(), nil}
 }
 
+// path: src/update.go
+// path: src/update.go
 func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 	m.textarea.Reset()
-
 	m.output += m.style.accent.Render("You: ") + raw + "\n\n"
 	m.renderOutput(true)
 
@@ -388,27 +421,34 @@ func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 	m.thinking = "thinking"
 
 	cmd := func() tea.Msg {
-		// Orchestrate, persist, run, and auto-repair if enabled
 		_, tree := m.refreshContext()
 		prompt := fmt.Sprintf("File tree:\n%s\n\nsubagent:%s %s", tree, m.selected.name, raw)
+
+		// 🧭 If Orchestrator, run the multi-step planner
+		if strings.EqualFold(m.selected.name, "orchestrator") {
+			if err := RunPlanner(m.ctx, m.agent, m.working, raw, m); err != nil {
+				return stepBuildCompleteMsg{err: err}
+			}
+			return nil // planner streams messages directly
+		}
+
+		// 🧩 Default single-shot codegen
 		result, err := RunHeadless(m.ctx, m.agent, m.working, prompt)
 		if err != nil {
 			return generateMsg{"", err}
 		}
 
 		var out strings.Builder
-		out.WriteString(m.style.accent.Render(m.selected.name+":") + "\n")
-		out.WriteString("\n---\n")
-
-		// Report file actions
+		out.WriteString(m.style.accent.Render(m.selected.name+":") + "\n\n")
 		for _, action := range result.Actions {
 			switch action.Action {
 			case "saved":
-				out.WriteString(m.style.success.Render(fmt.Sprintf("💾 Saved %s\n", action.Path)))
+				out.WriteString(m.style.success.Render(fmt.Sprintf("💾 %s\n", action.Path)))
 				if strings.TrimSpace(action.Diff) != "" {
-									out.WriteString(m.style.subtle.Render("```diff") + "\n")
-									out.WriteString(action.Diff)
-									out.WriteString(m.style.subtle.Render("```") + "\n")				}
+					out.WriteString(m.style.subtle.Render("```diff") + "\n")
+					out.WriteString(action.Diff)
+					out.WriteString(m.style.subtle.Render("```") + "\n")
+				}
 			case "deleted", "removed":
 				out.WriteString(m.style.subtle.Render(fmt.Sprintf("🧹 %s %s\n", strings.Title(action.Action), action.Path)))
 			case "error":
@@ -417,9 +457,6 @@ func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 				out.WriteString(m.style.subtle.Render(fmt.Sprintf("ℹ️ %s\n", action.Message)))
 			}
 		}
-
-		// Friendly hint to run locally
-
 		return generateMsg{out.String(), nil}
 	}
 
