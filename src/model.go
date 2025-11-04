@@ -89,26 +89,25 @@ type stepBuildCompleteMsg struct {
 }
 
 type model struct {
-	ctx          context.Context
-	agent        *agent.Agent
-	utcp         utcp.UtcpClientInterface
-	working      string
-	history      []string
-	mode         mode
-	prevMode     mode
-	selected     plugin
-	isThinking   bool
-	selectedUTCP utcpItem
-	list         list.Model
-	dirlist      list.Model
-	textarea     textarea.Model
-	viewport     viewport.Model
-	spinner      spinner.Model
-	thinking     string
-	output       string
-	width        int
-	height       int
-	style        styles
+	ctx        context.Context
+	agent      *agent.Agent
+	utcp       utcp.UtcpClientInterface
+	working    string
+	history    []string
+	mode       mode
+	prevMode   mode
+	selected   plugin
+	isThinking bool
+	list       list.Model
+	dirlist    list.Model
+	textarea   textarea.Model
+	viewport   viewport.Model
+	spinner    spinner.Model
+	thinking   string
+	output     string
+	width      int
+	height     int
+	style      styles
 
 	Program *tea.Program
 	mu      sync.Mutex
