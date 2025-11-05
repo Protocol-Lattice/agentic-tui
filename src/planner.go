@@ -123,7 +123,11 @@ User goal:
 		for _, act := range headlessRes.Actions {
 			switch act.Action {
 			case "saved":
-				safeSend(m, fmt.Sprintf("💾 %s (%s)\n", act.Path, act.Message))
+				if strings.TrimSpace(act.Diff) != "" {
+					safeSend(m, fmt.Sprintf("💾 %s (%s)\n```diff\n%s\n```\n", act.Path, act.Message, act.Diff))
+				} else {
+					safeSend(m, fmt.Sprintf("💾 %s (%s, no diff)\n", act.Path, act.Message))
+				}
 			case "deleted", "removed":
 				safeSend(m, fmt.Sprintf("🧹 %s %s\n", strings.Title(act.Action), act.Path))
 			case "error":
@@ -157,4 +161,24 @@ func heuristicSplit(s string) []PlanStep {
 		}
 	}
 	return steps
+}
+
+// inside planner.go
+
+func (m *model) logStepDiff(stepName string, actions []FileAction) {
+	safeSend(m, fmt.Sprintf("\n🔍 Changes in step: %s\n", stepName))
+	for _, act := range actions {
+		switch act.Action {
+		case "saved":
+			if strings.TrimSpace(act.Diff) != "" {
+				safeSend(m, fmt.Sprintf("💾 %s\n```diff\n%s\n```\n", act.Path, act.Diff))
+			} else {
+				safeSend(m, fmt.Sprintf("💾 %s (no diff)\n", act.Path))
+			}
+		case "deleted", "removed":
+			safeSend(m, fmt.Sprintf("🧹 %s %s\n", strings.Title(act.Action), act.Path))
+		case "error":
+			safeSend(m, fmt.Sprintf("❌ %s: %s\n", act.Path, act.Message))
+		}
+	}
 }
