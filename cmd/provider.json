@@ -1,7 +1,7 @@
 {
   "providers": [
     {
-      "name": "demo_tools",
+      "name": "code",
       "provider_type": "mcp",
       "command": ["npx", "-y", "mcp-server-code-runner@latest"],
       "args": [],

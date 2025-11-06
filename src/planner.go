@@ -141,7 +141,7 @@ User goal:
 			"code":       string(code),
 		}
 
-		res, err := m.utcp.CallTool(ctx, "demo_tools.code-runner", args)
+		res, err := m.utcp.CallTool(ctx, "code.code-runner", args)
 		if err != nil {
 			msg := fmt.Sprintf("❌ Runtime error (%s): %v", filepath.Base(entryPath), err)
 			safeSend(m, msg+"\n")
