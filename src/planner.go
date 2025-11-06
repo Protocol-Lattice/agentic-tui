@@ -98,7 +98,7 @@ Example:
 User goal:
 %s`, userPrompt)
 
-	resp, err := ag.Generate(ctx, "planner", metaPrompt)
+	resp, err := ag.Generate(ctx, m.sessionID, metaPrompt)
 	if err != nil {
 		safeSend(m, fmt.Sprintf("❌ planner failed: %v\n", err))
 		close(m.plannerQueue)
