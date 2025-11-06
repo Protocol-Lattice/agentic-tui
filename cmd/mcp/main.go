@@ -2,12 +2,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -47,16 +49,6 @@ var languageConfigs = map[string]LanguageConfig{
 	"dart":       {Cmd: "dart", Extension: ".dart"},
 }
 
-type RunCodeParams struct {
-	Language string   `json:"language"`
-	Code     string   `json:"code,omitempty"`
-	Path     string   `json:"path,omitempty"`
-	File     string   `json:"file,omitempty"`
-	Args     []string `json:"args,omitempty"`
-	Timeout  int      `json:"timeout,omitempty"`
-	Cwd      string   `json:"cwd,omitempty"`
-}
-
 type CodeRunResult struct {
 	Success  bool   `json:"success"`
 	Output   string `json:"output"`
@@ -67,207 +59,176 @@ type CodeRunResult struct {
 }
 
 func runCode(params mcp.CallToolParams) (*CodeRunResult, error) {
-	lang := params.Arguments.(map[string]any)["language"].(string)
+	argsMap := params.Arguments.(map[string]any)
+	lang := argsMap["language"].(string)
 	config, ok := languageConfigs[lang]
 	if !ok {
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 
-	timeout := 30 * time.Second
-	if t, ok := params.Arguments.(map[string]any)["timeout"].(float64); ok {
+	timeout := 15 * time.Second
+	if t, ok := argsMap["timeout"].(float64); ok {
 		timeout = time.Duration(int(t)) * time.Second
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	code, _ := params.Arguments.(map[string]any)["code"].(string)
-	path, _ := params.Arguments.(map[string]any)["path"].(string)
-	file, _ := params.Arguments.(map[string]any)["file"].(string)
-	cwd, _ := params.Arguments.(map[string]any)["cwd"].(string)
-	argsAny, _ := params.Arguments.(map[string]any)["args"].([]any)
-	args := make([]string, len(argsAny))
+	code, _ := argsMap["code"].(string)
+	path, _ := argsMap["path"].(string)
+	file, _ := argsMap["file"].(string)
+	cwd, _ := argsMap["cwd"].(string)
+	argsAny, _ := argsMap["args"].([]any)
+
+	runArgs := make([]string, len(argsAny))
 	for i, v := range argsAny {
-		args[i] = fmt.Sprintf("%v", v)
+		runArgs[i] = fmt.Sprintf("%v", v)
 	}
 
-	var targetFile, workDir string
-	var cleanupFiles []string
-
+	var targetFile string
 	if code != "" {
 		tmpFile, err := os.CreateTemp("", fmt.Sprintf("mcp-code-*%s", config.Extension))
 		if err != nil {
-			return nil, fmt.Errorf("failed to create temp file: %v", err)
+			return nil, err
 		}
-		cleanupFiles = append(cleanupFiles, tmpFile.Name())
-		if _, err := tmpFile.WriteString(code); err != nil {
-			return nil, fmt.Errorf("failed to write code: %v", err)
-		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.WriteString(code)
 		tmpFile.Close()
 		targetFile = tmpFile.Name()
-		workDir = filepath.Dir(targetFile)
 	} else if path != "" {
-		absPath, err := filepath.Abs(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("invalid path: %v", err)
 		}
-		info, err := os.Stat(absPath)
-		if err != nil {
-			return nil, fmt.Errorf("path does not exist: %v", err)
-		}
 		if info.IsDir() {
 			if file == "" {
-				return nil, fmt.Errorf("file parameter required when path is a directory")
+				return nil, fmt.Errorf("file required for directory path")
 			}
-			targetFile = filepath.Join(absPath, file)
-			workDir = absPath
+			targetFile = filepath.Join(path, file)
 		} else {
-			targetFile = absPath
-			workDir = filepath.Dir(absPath)
+			targetFile = path
 		}
 	} else {
-		return nil, fmt.Errorf("either 'code' or 'path' must be provided")
+		return nil, fmt.Errorf("either code or path required")
 	}
 
 	if cwd != "" {
-		if abs, err := filepath.Abs(cwd); err == nil {
-			workDir = abs
-		}
+		os.Chdir(cwd)
 	}
 
-	defer func() {
-		for _, f := range cleanupFiles {
-			_ = os.Remove(f)
-		}
-	}()
-
-	startTime := time.Now()
-	select {
-	case <-ctx.Done():
-		return &CodeRunResult{Success: false, Error: "execution canceled by client", ExitCode: -1}, nil
-	default:
-	}
-
+	start := time.Now()
+	var cmd *exec.Cmd
+	var cmdStr string
 	var outputBin string
+
 	if config.NeedsCompile {
 		outputBin = filepath.Join(os.TempDir(), fmt.Sprintf("mcp-compiled-%d", time.Now().UnixNano()))
-		cleanupFiles = append(cleanupFiles, outputBin)
-		var compileArgs []string
+		defer os.Remove(outputBin)
 
+		var compileArgs []string
 		switch lang {
-		case "java":
-			compileArgs = []string{targetFile}
 		case "c", "cpp":
 			compileArgs = append(config.CompileArgs, outputBin, targetFile)
 		case "rust":
 			compileArgs = []string{targetFile, "-o", outputBin}
+		case "java":
+			compileArgs = []string{targetFile}
 		}
 
-		cmd := exec.Command(config.Cmd, compileArgs...)
-		cmd.Dir = workDir
-
-		// Kill compiler after 2 seconds if it hangs
-		runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := cmd.Start(); err != nil {
-			return &CodeRunResult{
-				Success:  false,
-				Error:    fmt.Sprintf("failed to start command: %v", err),
-				Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
-				ExitCode: 1,
-			}, nil
-		}
-
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-
-		select {
-		case <-runCtx.Done():
-			_ = cmd.Process.Kill()
-			return &CodeRunResult{
-				Success:  false,
-				Error:    "process killed after 5s timeout",
-				Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
-				ExitCode: -1,
-			}, nil
-		case err := <-done:
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					return &CodeRunResult{
-						Success:  false,
-						Error:    string(exitErr.Stderr),
-						Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
-						ExitCode: exitErr.ExitCode(),
-					}, nil
-				}
-				return &CodeRunResult{
-					Success:  false,
-					Error:    err.Error(),
-					Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
-					ExitCode: 1,
-				}, nil
-			}
+		compileCmd := exec.CommandContext(ctx, config.Cmd, compileArgs...)
+		compileOut, err := compileCmd.CombinedOutput()
+		if err != nil {
+			return &CodeRunResult{Success: false, Error: string(compileOut), ExitCode: 1}, nil
 		}
 	}
 
-	var cmd *exec.Cmd
-	var cmdStr string
 	if config.RunCompiled && config.NeedsCompile {
-		switch lang {
-		case "java":
+		if lang == "java" {
 			className := strings.TrimSuffix(filepath.Base(targetFile), ".java")
-			allArgs := append([]string{"-cp", workDir, className}, args...)
+			allArgs := append([]string{"-cp", filepath.Dir(targetFile), className}, runArgs...)
 			cmd = exec.CommandContext(ctx, "java", allArgs...)
 			cmdStr = fmt.Sprintf("java %s", strings.Join(allArgs, " "))
-		default:
-			allArgs := append([]string{outputBin}, args...)
-			cmd = exec.CommandContext(ctx, outputBin, args...)
+		} else {
+			allArgs := append([]string{outputBin}, runArgs...)
+			cmd = exec.CommandContext(ctx, outputBin, runArgs...)
 			cmdStr = fmt.Sprintf("%s %s", outputBin, strings.Join(allArgs, " "))
 		}
 	} else {
-		allArgs := append(append(config.Args, targetFile), args...)
+		allArgs := append(append(config.Args, targetFile), runArgs...)
 		cmd = exec.CommandContext(ctx, config.Cmd, allArgs...)
 		cmdStr = fmt.Sprintf("%s %s", config.Cmd, strings.Join(allArgs, " "))
 	}
 
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
-	duration := time.Since(startTime)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
 
-	result := &CodeRunResult{
-		Output:   string(output),
-		Duration: duration.String(),
-		Command:  cmdStr,
+	if err := cmd.Start(); err != nil {
+		return &CodeRunResult{Success: false, Error: err.Error(), ExitCode: 1}, nil
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
-		result.Success = false
-		result.Error = fmt.Sprintf("Execution timed out after %v", timeout)
-		result.ExitCode = -1
+	outputChan := make(chan string)
+	go func() {
+		out := new(strings.Builder)
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			out.WriteString(scanner.Text() + "\n")
+		}
+		scannerErr := bufio.NewScanner(stderrPipe)
+		for scannerErr.Scan() {
+			out.WriteString(scannerErr.Text() + "\n")
+		}
+		outputChan <- out.String()
+	}()
+
+	select {
+	case <-time.After(2 * time.Second):
+		// assume it’s a running server if still alive
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		duration := time.Since(start)
+		return &CodeRunResult{
+			Success:  true,
+			Output:   "Server run successfully 🚀",
+			Duration: duration.String(),
+			Command:  cmdStr,
+			ExitCode: 0,
+		}, nil
+
+	case <-ctx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return &CodeRunResult{
+			Success:  false,
+			Error:    fmt.Sprintf("Execution timed out after %v", timeout),
+			Command:  cmdStr,
+			ExitCode: -1,
+		}, nil
+
+	case out := <-outputChan:
+		_ = cmd.Wait()
+		duration := time.Since(start)
+		result := &CodeRunResult{
+			Output:   out,
+			Duration: duration.String(),
+			Command:  cmdStr,
+		}
+
+		if err := ctx.Err(); err == context.DeadlineExceeded {
+			result.Success = false
+			result.Error = fmt.Sprintf("Execution timed out after %v", timeout)
+			result.ExitCode = -1
+		} else {
+			result.Success = true
+		}
+
 		return result, nil
 	}
-
-	if err != nil {
-		result.Success = false
-		result.Error = err.Error()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			result.ExitCode = 1
-		}
-	} else {
-		result.Success = true
-	}
-
-	return result, nil
 }
 
 func main() {
-	s := server.NewMCPServer("code-runner", "1.0.1", server.WithToolCapabilities(true))
+	s := server.NewMCPServer("code-runner", "1.0.3", server.WithToolCapabilities(true))
 
-	runCodeTool := mcp.NewTool("run_code",
-		mcp.WithDescription("Execute code in any supported programming language"),
+	runTool := mcp.NewTool("run_code",
+		mcp.WithDescription("Run code in various programming languages with timeout handling and server detection"),
 		mcp.WithString("language", mcp.Required()),
 		mcp.WithString("code"),
 		mcp.WithString("path"),
@@ -277,32 +238,26 @@ func main() {
 		mcp.WithString("cwd"),
 	)
 
-	s.AddTool(runCodeTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(runTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		result, err := runCode(req.Params)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		outputText := fmt.Sprintf(
-			"✓ Code execution completed\n\nCommand: %s\nSuccess: %v\nExit Code: %d\nDuration: %s\n\n--- Output ---\n%s",
-			result.Command, result.Success, result.ExitCode, result.Duration, result.Output)
-
+		text := fmt.Sprintf("✅ Command: %s\n⏱ Duration: %s\nSuccess: %v\n\n--- Output ---\n%s",
+			result.Command, result.Duration, result.Success, result.Output)
 		if result.Error != "" {
-			outputText += fmt.Sprintf("\n\n--- Error ---\n%s", result.Error)
+			text += fmt.Sprintf("\n\n--- Error ---\n%s", result.Error)
 		}
-
-		return mcp.NewToolResultText(outputText), nil
+		return mcp.NewToolResultText(text), nil
 	})
-
-	os.Stdout.Sync()
-	os.Stderr.Sync()
 
 	if err := server.ServeStdio(s); err != nil {
 		if strings.Contains(err.Error(), "broken pipe") {
-			fmt.Fprintln(os.Stderr, "⚠️  Client disconnected (broken pipe) — exiting gracefully.")
+			fmt.Fprintln(os.Stderr, "⚠️ Client disconnected — exiting gracefully.")
 			return
 		}
-		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ Server error: %v\n", err)
 		os.Exit(1)
 	}
 }

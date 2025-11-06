@@ -183,9 +183,24 @@ User goal:
 		}
 	}
 
+	// Ensure the thinking state is cleared in the UI.
+	// This explicitly sends a message to the main Bubble Tea loop.
+	// We assume m.Program is correctly initialized by the main application.
+	if m.Program != nil {
+		var finalErr error
+		// Check if any step had a runtime error
+		for _, step := range steps {
+			if step.PrevRuntimeErr != "" {
+				finalErr = fmt.Errorf("planner completed with errors in step '%s': %s", step.Name, step.PrevRuntimeErr)
+				break
+			}
+		}
+		m.Program.Send(stepBuildCompleteMsg{err: finalErr})
+	}
+
 	safeSend(m, fmt.Sprintf("\n✅ Planner finished in %s\n", time.Since(start).Round(time.Second)))
 	close(m.plannerQueue)
-	return nil
+	return nil // The overall error is now communicated via stepBuildCompleteMsg // The overall error is now communicated via stepBuildCompleteMsg
 }
 
 // path: src/planner.go
