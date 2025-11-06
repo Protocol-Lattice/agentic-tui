@@ -35,18 +35,18 @@ func safeSend(m *model, line string) {
 // findMainFile scans recursively for the most likely entrypoint across languages.
 func findMainFile(root string) (string, string) {
 	candidates := map[string][]string{
-		"go":     {"main.go"},
-		"python": {"app.py", "main.py"},
-		"js":     {"index.js", "main.js"},
-		"ts":     {"index.ts", "main.ts", "index.tsx"},
-		"rust":   {"main.rs"},
-		"java":   {"Main.java"},
-		"cpp":    {"main.cpp", "main.cc", "main.cxx"},
-		"c":      {"main.c"},
-		"rb":     {"main.rb", "app.rb"},
-		"php":    {"index.php"},
-		"swift":  {"main.swift"},
-		"kotlin": {"Main.kt"},
+		"go":         {"main.go"},
+		"python":     {"app.py", "main.py"},
+		"javascript": {"index.js", "main.js"},
+		"typescript": {"index.ts", "main.ts", "index.tsx"},
+		"rust":       {"main.rs"},
+		"java":       {"Main.java"},
+		"cpp":        {"main.cpp", "main.cc", "main.cxx"},
+		"c":          {"main.c"},
+		"ruby":       {"main.rb", "app.rb"},
+		"php":        {"index.php"},
+		"swift":      {"main.swift"},
+		"kotlin":     {"Main.kt"},
 	}
 
 	var foundPath, lang string
