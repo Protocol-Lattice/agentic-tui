@@ -41,12 +41,19 @@ func findMainFile(root string) (string, string) {
 		"typescript": {"index.ts", "main.ts", "index.tsx"},
 		"rust":       {"main.rs"},
 		"java":       {"Main.java"},
-		"cpp":        {"main.cpp", "main.cc", "main.cxx"},
 		"c":          {"main.c"},
+		"cpp":        {"main.cpp", "main.cc", "main.cxx"},
 		"ruby":       {"main.rb", "app.rb"},
-		"php":        {"index.php"},
+		"php":        {"index.php", "main.php"},
+		"perl":       {"main.pl"},
+		"r":          {"main.R", "script.R"},
+		"lua":        {"main.lua", "app.lua"},
+		"bash":       {"run.sh", "main.sh"},
+		"shell":      {"run.sh", "main.sh"},
+		"kotlin":     {"Main.kt", "main.kts"},
+		"scala":      {"Main.scala", "App.scala"},
 		"swift":      {"main.swift"},
-		"kotlin":     {"Main.kt"},
+		"dart":       {"main.dart"},
 	}
 
 	var foundPath, lang string
