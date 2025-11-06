@@ -163,15 +163,51 @@ func runCode(params mcp.CallToolParams) (*CodeRunResult, error) {
 			compileArgs = []string{targetFile, "-o", outputBin}
 		}
 
-		cmd := exec.CommandContext(ctx, config.Cmd, compileArgs...)
+		cmd := exec.Command(config.Cmd, compileArgs...)
 		cmd.Dir = workDir
-		if out, err := cmd.CombinedOutput(); err != nil {
+
+		// Kill compiler after 2 seconds if it hangs
+		runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := cmd.Start(); err != nil {
 			return &CodeRunResult{
 				Success:  false,
-				Error:    fmt.Sprintf("Compilation failed: %s", string(out)),
+				Error:    fmt.Sprintf("failed to start command: %v", err),
 				Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
 				ExitCode: 1,
 			}, nil
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		select {
+		case <-runCtx.Done():
+			_ = cmd.Process.Kill()
+			return &CodeRunResult{
+				Success:  false,
+				Error:    "process killed after 5s timeout",
+				Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
+				ExitCode: -1,
+			}, nil
+		case err := <-done:
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					return &CodeRunResult{
+						Success:  false,
+						Error:    string(exitErr.Stderr),
+						Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
+						ExitCode: exitErr.ExitCode(),
+					}, nil
+				}
+				return &CodeRunResult{
+					Success:  false,
+					Error:    err.Error(),
+					Command:  fmt.Sprintf("%s %s", config.Cmd, strings.Join(compileArgs, " ")),
+					ExitCode: 1,
+				}, nil
+			}
 		}
 	}
 

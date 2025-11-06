@@ -313,6 +313,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isThinking = false
 		m.thinking = ""
 		m.renderOutput(true)
+		// This message signals the end of the planner's work.
+		// We need to ensure the planner queue is also considered closed.
+		if m.plannerQueue != nil {
+			close(m.plannerQueue)
+		}
 		return m, nil
 
 		// New queue flusher — called repeatedly while plannerQueue has messages
