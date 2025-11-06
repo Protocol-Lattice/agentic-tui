@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,11 @@ func findMainFile(root string) (string, string) {
 		for l, patterns := range candidates {
 			for _, p := range patterns {
 				if name == p {
+					rel, err := filepath.Rel(root, path)
+					if err != nil {
+						log.Printf("failed to make relative path: %v", err)
+					}
+					path = rel
 					foundPath, lang = path, l
 					return filepath.SkipDir
 				}
@@ -75,7 +81,7 @@ func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt stri
 
 	metaPrompt := fmt.Sprintf(`You are a software engineer. The user has a goal that requires code changes.
 
-Break the goal into 3–5 concrete, immediately executable steps. 
+Break the goal into 1–5 concrete, immediately executable steps. 
 Respond with ONLY a JSON array of {"name", "goal"} objects — no explanations, no planning meta-text.
 The first step must be a **direct code modification or creation**, not "create a plan".
 
@@ -141,19 +147,12 @@ User goal:
 			step.PrevRuntimeErr = ""
 			continue
 		}
-
-		code, err := os.ReadFile(entryPath)
-		if err != nil {
-			msg := fmt.Sprintf("❌ Failed to read %s: %v", entryPath, err)
-			safeSend(m, msg+"\n")
-			step.PrevRuntimeErr = msg
-			continue
-		}
-
 		args := map[string]any{
-			"languageId": lang,
-			"code":       string(code),
+			"language": lang,      // not languageId — use the same key name your tool expects
+			"path":     workspace, // file path to run
+			"file":     entryPath, // optional: file content to run instead of path'
 		}
+
 		tools, err := m.utcp.SearchTools("", 5)
 		if err != nil {
 			msg := fmt.Sprintf("❌ Tool search error: %v", err)
