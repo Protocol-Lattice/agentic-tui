@@ -73,9 +73,15 @@ func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt stri
 	start := time.Now()
 	userPrompt = strings.TrimSpace(userPrompt)
 
-	metaPrompt := fmt.Sprintf(`You are an expert software project planner.
-Your task is to decompose the user's goal into a sequence of 3 to 5 actionable steps.
-Return ONLY JSON: [{"name":"Step 1","goal":"..."}].
+	metaPrompt := fmt.Sprintf(`You are a software engineer. The user has a goal that requires code changes.
+
+Break the goal into 3–5 concrete, immediately executable steps. 
+Respond with ONLY a JSON array of {"name", "goal"} objects — no explanations, no planning meta-text.
+The first step must be a **direct code modification or creation**, not "create a plan".
+
+Example:
+[{"name":"Step 1: Add config loader","goal":"Create config/config.go and implement a function LoadConfig() reading from .env."}]
+
 User goal:
 %s`, userPrompt)
 
@@ -86,7 +92,12 @@ User goal:
 		return err
 	}
 
-	resp = strings.TrimSpace(strings.Trim(resp, "`"))
+	// Strip markdown fences to get raw JSON, handling optional language tags.
+	resp = strings.TrimSpace(resp)
+	if strings.HasPrefix(resp, "```") && strings.HasSuffix(resp, "```") {
+		resp = strings.TrimSuffix(resp, "```")
+		resp = resp[strings.Index(resp, "\n")+1:] // Move past the first line (e.g., ```json)
+	}
 	var steps []PlanStep
 	if err := json.Unmarshal([]byte(resp), &steps); err != nil || len(steps) == 0 {
 		steps = heuristicSplit(resp)
@@ -95,6 +106,11 @@ User goal:
 		safeSend(m, "❌ no valid steps parsed\n")
 		close(m.plannerQueue)
 		return fmt.Errorf("no valid steps parsed")
+	}
+
+	// Enforce a maximum of 5 steps to prevent overly long plans.
+	if len(steps) > 5 {
+		steps = steps[:5]
 	}
 
 	safeSend(m, fmt.Sprintf("🧭 Plan created with %d steps.\n", len(steps)))
@@ -116,8 +132,8 @@ User goal:
 			continue
 		}
 
-		// ✅ FIX: use standalone helper, not m.logStepDiff
-		m.logStepDiff(step.Name, headlessRes.Actions)
+		// Log the diffs from the headless run.
+		logStepDiff(m, step.Name, headlessRes.Actions)
 
 		entryPath, lang := findMainFile(workspace)
 		if entryPath == "" {
@@ -138,7 +154,14 @@ User goal:
 			"languageId": lang,
 			"code":       string(code),
 		}
-		res, err := m.utcp.CallTool(ctx, "code_tools.run_code", args)
+		tools, err := m.utcp.SearchTools("", 5)
+		if err != nil {
+			msg := fmt.Sprintf("❌ Tool search error: %v", err)
+			safeSend(m, msg+"\n")
+			step.PrevRuntimeErr = msg
+			continue
+		}
+		res, err := m.utcp.CallTool(ctx, tools[0].Name, args)
 		if err != nil {
 			msg := fmt.Sprintf("❌ Runtime error (%s): %v", filepath.Base(entryPath), err)
 			safeSend(m, msg+"\n")
@@ -161,13 +184,12 @@ User goal:
 
 // path: src/planner.go
 // Add this to the bottom of the file (below heuristicSplit)
-func (m *model) logStepDiff(stepName string, actions []FileAction) {
+func logStepDiff(m *model, stepName string, actions []FileAction) {
 	if m == nil || len(actions) == 0 {
 		return
 	}
 
 	safeSend(m, fmt.Sprintf("\n🔍 Changes in step: %s\n", stepName))
-
 	for _, act := range actions {
 		switch act.Action {
 		case "saved":

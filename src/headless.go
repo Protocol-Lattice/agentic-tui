@@ -38,7 +38,13 @@ func RunHeadless(ctx context.Context, ag *agent.Agent, workspace, userPrompt str
 	_ = os.MkdirAll(abs, 0o755)
 
 	files, entries := collectAttachmentFiles(abs, 500, 10_000_000, 50_000, "")
-	prompt := fmt.Sprintf("File tree:\n```\n%s\n```\n\nMy task:\n%s", buildTree(entries), userPrompt)
+	prompt := fmt.Sprintf(`File tree:
+`+"```\n%s\n```"+`
+
+My task:
+%s
+
+After generating the code, also generate a docker-compose.yml file to run the application.`, buildTree(entries), userPrompt)
 
 	session := randomID()
 	res, err := ag.GenerateWithFiles(ctx, session, prompt, files)

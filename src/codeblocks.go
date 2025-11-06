@@ -23,7 +23,8 @@ func WriteCodeBlocks(root, response string) ([]FileAction, error) {
 	for i, b := range blocks {
 		path, body := extractPathAndStrip(b.lang, b.body)
 		if path == "" {
-			path = fmt.Sprintf("generated/file_%d.%s", i+1, b.lang)
+			ext := strings.TrimPrefix(extFromLang(b.lang), ".")
+			path = fmt.Sprintf("generated/file_%d.%s", i+1, ext)
 		}
 		abs := filepath.Join(root, filepath.FromSlash(path))
 		_ = os.MkdirAll(filepath.Dir(abs), 0o755)
