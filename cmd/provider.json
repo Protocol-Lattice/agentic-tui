@@ -1,0 +1,14 @@
+{
+  "providers": [
+    {
+      "name": "code_tools",
+      "provider_type": "mcp",
+      "command": ["npx", "-y", "mcp-server-code-runner@latest"],
+      "args": [],
+      "env": {},
+      "workingDir": ".",
+      "stdinData": "",
+      "timeout": 30
+    }
+  ]
+}
