@@ -25,6 +25,11 @@ cd lattice-code
 
 # Build the binary
 go build -o lattice-code ./cmd
+
+# Build mcp
+cd cmd/mcp
+go build -o lattice-code-runner main.go
+sudo mv lattice-code-runner /usr/local/bin/
 ```
 
 ## Configuration
