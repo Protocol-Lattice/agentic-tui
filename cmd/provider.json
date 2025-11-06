@@ -1,7 +1,7 @@
 {
   "providers": [
     {
-      "name": "code",
+      "name": "code_tools",
       "provider_type": "mcp",
       "command": ["npx", "-y", "mcp-server-code-runner@latest"],
       "args": [],

@@ -73,13 +73,11 @@ func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt stri
 	start := time.Now()
 	userPrompt = strings.TrimSpace(userPrompt)
 
-	metaPrompt := fmt.Sprintf(`
-You are an expert software project planner.
-Decompose the following goal into 3–5 ordered steps.
+	metaPrompt := fmt.Sprintf(`You are an expert software project planner.
+Your task is to decompose the user's goal into a sequence of 3 to 5 actionable steps.
 Return ONLY JSON: [{"name":"Step 1","goal":"..."}].
 User goal:
-%s
-`, userPrompt)
+%s`, userPrompt)
 
 	resp, err := ag.Generate(ctx, "planner", metaPrompt)
 	if err != nil {
@@ -140,8 +138,7 @@ User goal:
 			"languageId": lang,
 			"code":       string(code),
 		}
-
-		res, err := m.utcp.CallTool(ctx, "code.code-runner", args)
+		res, err := m.utcp.CallTool(ctx, "code_tools.run_code", args)
 		if err != nil {
 			msg := fmt.Sprintf("❌ Runtime error (%s): %v", filepath.Base(entryPath), err)
 			safeSend(m, msg+"\n")
