@@ -167,14 +167,14 @@ User goal:
 				"timeout":  15, // seconds
 			}
 
-			if m.utcp == nil {
+			if ag.UTCPClient == nil {
 				msg := "❌ UTCP client not available"
 				safeSend(m, msg+"\n")
 				step.PrevRuntimeErr = msg
 				continue
 			}
 
-			tools, err := m.utcp.SearchTools("", 5)
+			tools, err := ag.UTCPClient.SearchTools("", 5)
 			if err != nil {
 				msg := fmt.Sprintf("❌ Tool search error: %v", err)
 				safeSend(m, msg+"\n")
@@ -195,7 +195,7 @@ User goal:
 
 			go func() {
 				defer func() { _ = recover() }()
-				res, err := m.utcp.CallTool(callCtx, tools[0].Name, args)
+				res, err := ag.UTCPClient.CallTool(callCtx, tools[0].Name, args)
 				if err != nil {
 					errCh <- err
 					return

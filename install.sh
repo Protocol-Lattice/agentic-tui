@@ -15,3 +15,5 @@ sudo mv lattice-code-runner /usr/local/bin/
 
 echo "✅ Installation complete!"
 echo "You can now run: lattice-code-runner --help"
+mkdir -p ~/utcp && cp provider.json ~/utcp/provider.json
+echo "move provider.json to ~/utcp/"

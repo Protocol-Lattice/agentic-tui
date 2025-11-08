@@ -25,12 +25,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	u, err := BuildUTCP(ctx)
-	if err != nil {
-		fmt.Println("⚠️ UTCP unavailable:", err)
-	}
-
-	m := NewModel(ctx, a, u, startDir)
+	m := NewModel(ctx, a, startDir)
 	p = tea.NewProgram(m, tea.WithAltScreen())
 	m.Program = p // Give the model a reference to the program.
 	if _, err := p.Run(); err != nil {

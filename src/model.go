@@ -16,8 +16,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	utcp "github.com/universal-tool-calling-protocol/go-utcp"
-
 	agent "github.com/Protocol-Lattice/go-agent"
 )
 
@@ -91,7 +89,6 @@ type stepBuildCompleteMsg struct {
 type model struct {
 	ctx        context.Context
 	agent      *agent.Agent
-	utcp       utcp.UtcpClientInterface
 	working    string
 	history    []string
 	mode       mode
@@ -146,7 +143,7 @@ type styles struct {
 	center        lipgloss.Style
 }
 
-func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, startDir string) *model {
+func NewModel(ctx context.Context, a *agent.Agent, startDir string) *model {
 	dirItems := loadDirs(startDir)
 	dirDelegate := list.NewDefaultDelegate()
 	dirList := list.New(dirItems, dirDelegate, 0, 0)
@@ -183,7 +180,6 @@ func NewModel(ctx context.Context, a *agent.Agent, u utcp.UtcpClientInterface, s
 	m := &model{
 		ctx:          ctx,
 		agent:        a,
-		utcp:         u,
 		working:      startDir,
 		history:      []string{startDir},
 		mode:         modeDir,

@@ -378,7 +378,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) callUTCP(toolName string, args map[string]any) tea.Msg {
-	res, err := m.utcp.CallTool(m.ctx, toolName, args)
+	res, err := m.agent.UTCPClient.CallTool(m.ctx, toolName, args)
 	if err != nil {
 		return generateMsg{"", err}
 	}
@@ -386,7 +386,7 @@ func (m *model) callUTCP(toolName string, args map[string]any) tea.Msg {
 }
 
 func (m *model) callUTCPStream(toolName string, args map[string]any) tea.Msg {
-	stream, err := m.utcp.CallToolStream(m.ctx, toolName, args)
+	stream, err := m.agent.UTCPClient.CallToolStream(m.ctx, toolName, args)
 	if err != nil {
 		return generateMsg{"", err}
 	}

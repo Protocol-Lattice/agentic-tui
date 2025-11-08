@@ -2,6 +2,7 @@ package src
 
 import (
 	"context"
+	"fmt"
 
 	agent "github.com/Protocol-Lattice/go-agent"
 	adk "github.com/Protocol-Lattice/go-agent/src/adk"
@@ -13,6 +14,10 @@ import (
 )
 
 func BuildAgent(ctx context.Context) (*agent.Agent, error) {
+	utcp, err := BuildUTCP(ctx)
+	if err != nil {
+		fmt.Println("⚠️ UTCP unavailable:", err)
+	}
 	memOpts := memory.DefaultOptions()
 	builder, err := adk.New(
 		ctx,
@@ -26,6 +31,7 @@ func BuildAgent(ctx context.Context) (*agent.Agent, error) {
 				adkmodules.StaticToolProvider([]agent.Tool{&tools.EchoTool{}}, nil),
 			),
 		),
+		adk.WithUTCP(utcp),
 	)
 	if err != nil {
 		return nil, err
