@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
+echo "🔧 Building lattice-code from ./cmd..."
+go build -o lattice-code ./cmd
+
+echo "🚀 Moving binary to /usr/local/bin (requires sudo)..."
+sudo mv lattice-code /usr/local/bin/
+
 echo "🔧 Building lattice-code-runner from cmd/mcp..."
 go build -o lattice-code-runner ./cmd/mcp/main.go
 
