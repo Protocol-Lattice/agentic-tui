@@ -37,7 +37,7 @@ func RunHeadless(ctx context.Context, ag *agent.Agent, workspace, userPrompt str
 	abs, _ := filepath.Abs(workspace)
 	_ = os.MkdirAll(abs, 0o755)
 
-	files, entries := collectAttachmentFiles(abs, 500, 10_000_000, 50_000, "")
+	files, entries := collectAttachmentFiles(abs, 100, 1_000_000, 20_000, "")
 	prompt := fmt.Sprintf(`File tree:
 `+"```\n%s\n```"+`
 

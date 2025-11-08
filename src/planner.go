@@ -150,6 +150,9 @@ User goal:
 
 			logStepDiff(m, step.Name, headlessRes.Actions)
 
+			// Refresh UI context after file modifications
+			m.refreshContext()
+
 			entryPath, lang := findMainFile(workspace)
 			if entryPath == "" {
 				safeSend(m, fmt.Sprintf("ℹ️ No main file found for step %s\n", step.Name))
@@ -162,6 +165,13 @@ User goal:
 				"path":     workspace,
 				"file":     entryPath,
 				"timeout":  15, // seconds
+			}
+
+			if m.utcp == nil {
+				msg := "❌ UTCP client not available"
+				safeSend(m, msg+"\n")
+				step.PrevRuntimeErr = msg
+				continue
 			}
 
 			tools, err := m.utcp.SearchTools("", 5)
