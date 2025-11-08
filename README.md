@@ -27,9 +27,8 @@ cd lattice-code
 go build -o lattice-code ./cmd
 
 # Build mcp
-cd cmd/mcp
-go build -o lattice-code-runner main.go
-sudo mv lattice-code-runner /usr/local/bin/
+chmod +x install.sh
+./install.sh
 ```
 
 ## Configuration
