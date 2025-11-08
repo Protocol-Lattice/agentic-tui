@@ -23,9 +23,6 @@ To build the `lattice-code` CLI from source:
 git clone https://github.com/Protocol-Lattice/lattice-code.git
 cd lattice-code
 
-# Build the binary
-go build -o lattice-code ./cmd
-
 # Build mcp
 chmod +x install.sh
 ./install.sh
