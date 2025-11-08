@@ -93,7 +93,7 @@ func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt stri
 
 		metaPrompt := fmt.Sprintf(`You are a software engineer. The user has a goal that requires code changes.
 
-Break the goal into 1–5 concrete, immediately executable steps. 
+Break the goal into 2–4 concrete, immediately executable steps. 
 Respond with ONLY a JSON array of {"name", "goal"} objects — no explanations, no planning meta-text.
 The first step must be a **direct code modification or creation**, not "create a plan".
 
