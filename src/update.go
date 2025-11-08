@@ -208,11 +208,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
+				// Reset textarea and show user input
 				m.textarea.Reset()
 				m.output += m.style.accent.Render("You: ") + raw + "\n\n"
 				m.renderOutput(true)
+
+				// 🧠 Always set thinking state on every new prompt
 				m.isThinking = true
 				m.thinking = "thinking"
+				m.plannerQueue = make(chan string, 64)
 
 				// --- 1️⃣ UTCP command flow ---
 				if strings.HasPrefix(raw, "@utcp ") {
@@ -241,7 +245,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 
-					m.isThinking = true
 					m.thinking = "calling UTCP tool"
 
 					cmd := func() tea.Msg {
@@ -251,14 +254,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m.callUTCP(payload.Tool, payload.Args)
 					}
 
-					// stay in chat
 					return m, tea.Batch(cmd, m.spinner.Tick)
 				}
 
-				// --- 2️⃣ Default: always run planner after prompt ---
-				go RunPlanner(m.ctx, m.agent, m.working, raw, m)
-
-				// start reading planner queue
+				// --- 2️⃣ Default: orchestrator / planner ---
+				RunPlanner(m.ctx, m.agent, m.working, raw, m)
 				return m, tea.Batch(
 					tea.Tick(time.Millisecond*100, func(time.Time) tea.Msg { return plannerTickMsg{} }),
 					m.spinner.Tick,
@@ -426,9 +426,7 @@ func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 
 		// 🧭 If Orchestrator, run the multi-step planner
 		if strings.EqualFold(m.selected.name, "orchestrator") {
-			if err := RunPlanner(m.ctx, m.agent, m.working, raw, m); err != nil {
-				return stepBuildCompleteMsg{err: err}
-			}
+			RunPlanner(m.ctx, m.agent, m.working, raw, m)
 			return nil // planner streams messages directly
 		}
 
