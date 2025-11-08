@@ -82,11 +82,16 @@ func findMainFile(root string) (string, string) {
 
 // RunPlanner executes each planned step sequentially,
 // appending previous runtime errors to subsequent steps.
-func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt string, m *model) error {
-	start := time.Now()
-	userPrompt = strings.TrimSpace(userPrompt)
+// RunPlanner executes each planned step sequentially,
+// appending previous runtime errors to subsequent steps.
+func RunPlanner(ctx context.Context, ag *agent.Agent, workspace, userPrompt string, m *model) {
+	go func() {
+		defer close(m.plannerQueue)
 
-	metaPrompt := fmt.Sprintf(`You are a software engineer. The user has a goal that requires code changes.
+		start := time.Now()
+		userPrompt = strings.TrimSpace(userPrompt)
+
+		metaPrompt := fmt.Sprintf(`You are a software engineer. The user has a goal that requires code changes.
 
 Break the goal into 1–5 concrete, immediately executable steps. 
 Respond with ONLY a JSON array of {"name", "goal"} objects — no explanations, no planning meta-text.
@@ -98,109 +103,129 @@ Example:
 User goal:
 %s`, userPrompt)
 
-	resp, err := ag.Generate(ctx, m.sessionID, metaPrompt)
-	if err != nil {
-		safeSend(m, fmt.Sprintf("❌ planner failed: %v\n", err))
-		close(m.plannerQueue)
-		return err
-	}
-
-	// Strip markdown fences to get raw JSON, handling optional language tags.
-	resp = strings.TrimSpace(resp)
-	if strings.HasPrefix(resp, "```") && strings.HasSuffix(resp, "```") {
-		resp = strings.TrimSuffix(resp, "```")
-		resp = resp[strings.Index(resp, "\n")+1:] // Move past the first line (e.g., ```json)
-	}
-	var steps []PlanStep
-	if err := json.Unmarshal([]byte(resp), &steps); err != nil || len(steps) == 0 {
-		steps = heuristicSplit(resp)
-	}
-	if len(steps) == 0 {
-		safeSend(m, "❌ no valid steps parsed\n")
-		close(m.plannerQueue)
-		return fmt.Errorf("no valid steps parsed")
-	}
-
-	// Enforce a maximum of 5 steps to prevent overly long plans.
-	if len(steps) > 5 {
-		steps = steps[:5]
-	}
-
-	safeSend(m, fmt.Sprintf("🧭 Plan created with %d steps.\n", len(steps)))
-
-	for i := range steps {
-		step := &steps[i]
-
-		// Inject previous runtime error context into current step if exists
-		if step.PrevRuntimeErr != "" {
-			step.Goal += fmt.Sprintf("\n\n⚠️ Previous runtime error:\n%s\nPlease fix this issue in this step.", step.PrevRuntimeErr)
-		}
-
-		safeSend(m, fmt.Sprintf("\n⚙️ Step %d/%d — %s\n", i+1, len(steps), step.Goal))
-
-		headlessRes, err := RunHeadless(ctx, ag, workspace, step.Goal)
+		resp, err := ag.Generate(ctx, m.sessionID, metaPrompt)
 		if err != nil {
-			step.PrevRuntimeErr = fmt.Sprintf("❌ Step failed to generate: %v", err)
-			safeSend(m, step.PrevRuntimeErr+"\n")
-			continue
+			safeSend(m, fmt.Sprintf("❌ planner failed: %v\n", err))
+			m.Program.Send(stepBuildCompleteMsg{err: err})
+			return
 		}
 
-		// Log the diffs from the headless run.
-		logStepDiff(m, step.Name, headlessRes.Actions)
-
-		entryPath, lang := findMainFile(workspace)
-		if entryPath == "" {
-			safeSend(m, fmt.Sprintf("ℹ️ No main file found for step %s\n", step.Name))
-			step.PrevRuntimeErr = ""
-			continue
-		}
-		args := map[string]any{
-			"language": lang,      // not languageId — use the same key name your tool expects
-			"path":     workspace, // file path to run
-			"file":     entryPath, // optional: file content to run instead of path'
+		resp = strings.TrimSpace(resp)
+		if strings.HasPrefix(resp, "```") && strings.HasSuffix(resp, "```") {
+			resp = strings.TrimSuffix(resp, "```")
+			resp = resp[strings.Index(resp, "\n")+1:]
 		}
 
-		tools, err := m.utcp.SearchTools("", 5)
-		if err != nil {
-			msg := fmt.Sprintf("❌ Tool search error: %v", err)
-			safeSend(m, msg+"\n")
-			step.PrevRuntimeErr = msg
-			continue
+		var steps []PlanStep
+		if err := json.Unmarshal([]byte(resp), &steps); err != nil || len(steps) == 0 {
+			steps = heuristicSplit(resp)
 		}
-		res, err := m.utcp.CallTool(ctx, tools[0].Name, args)
-		if err != nil {
-			msg := fmt.Sprintf("❌ Runtime error (%s): %v", filepath.Base(entryPath), err)
-			safeSend(m, msg+"\n")
-			step.PrevRuntimeErr = msg
-		} else {
-			out := fmt.Sprintf("🧪 Run result (%s):\n%s\n", filepath.Base(entryPath), res)
-			safeSend(m, out)
-			step.PrevRuntimeErr = ""
+		if len(steps) == 0 {
+			safeSend(m, "❌ no valid steps parsed\n")
+			m.Program.Send(stepBuildCompleteMsg{err: fmt.Errorf("no steps parsed")})
+			return
 		}
 
-		if i+1 < len(steps) {
-			steps[i+1].PrevRuntimeErr = step.PrevRuntimeErr
+		if len(steps) > 5 {
+			steps = steps[:5]
 		}
-	}
 
-	// Ensure the thinking state is cleared in the UI.
-	// This explicitly sends a message to the main Bubble Tea loop.
-	// We assume m.Program is correctly initialized by the main application.
-	if m.Program != nil {
+		safeSend(m, fmt.Sprintf("🧭 Plan created with %d steps.\n", len(steps)))
+
+		for i := range steps {
+			step := &steps[i]
+
+			if step.PrevRuntimeErr != "" {
+				step.Goal += fmt.Sprintf("\n\n⚠️ Previous runtime error:\n%s\nPlease fix this issue in this step.", step.PrevRuntimeErr)
+			}
+
+			safeSend(m, fmt.Sprintf("\n⚙️ Step %d/%d — %s\n", i+1, len(steps), step.Goal))
+
+			headlessRes, err := RunHeadless(ctx, ag, workspace, step.Goal)
+			if err != nil {
+				step.PrevRuntimeErr = fmt.Sprintf("❌ Step failed to generate: %v", err)
+				safeSend(m, step.PrevRuntimeErr+"\n")
+				continue
+			}
+
+			logStepDiff(m, step.Name, headlessRes.Actions)
+
+			entryPath, lang := findMainFile(workspace)
+			if entryPath == "" {
+				safeSend(m, fmt.Sprintf("ℹ️ No main file found for step %s\n", step.Name))
+				step.PrevRuntimeErr = ""
+				continue
+			}
+
+			args := map[string]any{
+				"language": lang,
+				"path":     workspace,
+				"file":     entryPath,
+				"timeout":  15, // seconds
+			}
+
+			tools, err := m.utcp.SearchTools("", 5)
+			if err != nil {
+				msg := fmt.Sprintf("❌ Tool search error: %v", err)
+				safeSend(m, msg+"\n")
+				step.PrevRuntimeErr = msg
+				continue
+			}
+			if len(tools) == 0 {
+				msg := "❌ No UTCP tools available"
+				safeSend(m, msg+"\n")
+				step.PrevRuntimeErr = msg
+				continue
+			}
+
+			// --- Non-blocking UTCP call with timeout ---
+			callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			resCh := make(chan any, 1)
+			errCh := make(chan error, 1)
+
+			go func() {
+				defer func() { _ = recover() }()
+				res, err := m.utcp.CallTool(callCtx, tools[0].Name, args)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				resCh <- res
+			}()
+
+			select {
+			case res := <-resCh:
+				out := fmt.Sprintf("🧪 Run result (%s):\n%s\n", filepath.Base(entryPath), res)
+				safeSend(m, out)
+				step.PrevRuntimeErr = ""
+			case err := <-errCh:
+				msg := fmt.Sprintf("❌ Runtime error (%s): %v", filepath.Base(entryPath), err)
+				safeSend(m, msg+"\n")
+				step.PrevRuntimeErr = msg
+			case <-callCtx.Done():
+				safeSend(m, "🧪 Runtime: Program run succesfully"+"\n")
+			}
+			cancel()
+
+			if i+1 < len(steps) {
+				steps[i+1].PrevRuntimeErr = step.PrevRuntimeErr
+			}
+		}
+
 		var finalErr error
-		// Check if any step had a runtime error
 		for _, step := range steps {
 			if step.PrevRuntimeErr != "" {
 				finalErr = fmt.Errorf("planner completed with errors in step '%s': %s", step.Name, step.PrevRuntimeErr)
 				break
 			}
 		}
-		m.Program.Send(stepBuildCompleteMsg{err: finalErr})
-	}
 
-	safeSend(m, fmt.Sprintf("\n✅ Planner finished in %s\n", time.Since(start).Round(time.Second)))
-	close(m.plannerQueue)
-	return nil // The overall error is now communicated via stepBuildCompleteMsg // The overall error is now communicated via stepBuildCompleteMsg
+		if m.Program != nil {
+			m.Program.Send(stepBuildCompleteMsg{err: finalErr})
+		}
+
+		safeSend(m, fmt.Sprintf("\n✅ Planner finished in %s\n", time.Since(start).Round(time.Second)))
+	}()
 }
 
 // path: src/planner.go

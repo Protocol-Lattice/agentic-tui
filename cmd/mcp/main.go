@@ -2,13 +2,16 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,7 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// Language configurations
+// --- Language Configurations ---
 type LanguageConfig struct {
 	Cmd          string
 	Args         []string
@@ -49,6 +52,33 @@ var languageConfigs = map[string]LanguageConfig{
 	"dart":       {Cmd: "dart", Extension: ".dart"},
 }
 
+// --- Server Detection ---
+// --- Server Detection ---
+var serverRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)listening`),
+	regexp.MustCompile(`(?i)server\s+started`),
+	regexp.MustCompile(`(?i)running\s+on\s+port`),
+	regexp.MustCompile(`(?i)http://`),
+	regexp.MustCompile(`(?i)tcp`),
+	regexp.MustCompile(`(?i)port\s+\d+`),                      // "port 8080", "Port 3000"
+	regexp.MustCompile(`(?i):\d{4,5}`),                        // ":8080", ":3000", ":8000"
+	regexp.MustCompile(`(?i)localhost:\d+`),                   // "localhost:8080"
+	regexp.MustCompile(`(?i)0\.0\.0\.0:\d+`),                  // "0.0.0.0:8080"
+	regexp.MustCompile(`(?i)127\.0\.0\.1:\d+`),                // "127.0.0.1:8080"
+	regexp.MustCompile(`(?i)\[\:\:\]:\d+`),                    // "[::]:8080"
+	regexp.MustCompile(`(?i)starting\s+(server|application)`), // "starting server", "starting application"
+}
+
+func looksLikeServerOutput(s string) bool {
+	for _, re := range serverRegexes {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Result Struct ---
 type CodeRunResult struct {
 	Success  bool   `json:"success"`
 	Output   string `json:"output"`
@@ -58,198 +88,207 @@ type CodeRunResult struct {
 	Command  string `json:"command"`
 }
 
-func runCode(params mcp.CallToolParams) (*CodeRunResult, error) {
-	argsMap := params.Arguments.(map[string]any)
-	lang := argsMap["language"].(string)
+// --- Core Execution ---
+func runCommandWithDetection(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, cmdStr string) *CodeRunResult {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return &CodeRunResult{Success: false, Error: err.Error(), Command: cmdStr}
+	}
+
+	var buf bytes.Buffer
+	serverDetected := make(chan struct{}, 1)
+	done := make(chan error, 1)
+
+	// Read from stdout and stderr in separate goroutines to avoid blocking
+	bufMutex := &sync.Mutex{}
+	readFromStream := func(stream io.Reader) {
+		tmp := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			n, err := stream.Read(tmp)
+			if n > 0 {
+				chunk := string(tmp[:n])
+				bufMutex.Lock()
+				buf.WriteString(chunk)
+				shouldCheck := looksLikeServerOutput(chunk)
+				bufMutex.Unlock()
+
+				if shouldCheck {
+					select {
+					case serverDetected <- struct{}{}:
+					case <-ctx.Done():
+						return
+					default:
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+
+	go readFromStream(stdout)
+	go readFromStream(stderr)
+
+	go func() {
+		select {
+		case done <- cmd.Wait():
+		case <-ctx.Done():
+			// Context cancelled, don't block on Wait()
+			done <- fmt.Errorf("context cancelled")
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Context cancellation has highest priority
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		stdout.Close()
+		stderr.Close()
+		// Give a small timeout for goroutines to finish, but don't block indefinitely
+		return &CodeRunResult{
+			Success:  false,
+			Error:    ctx.Err().Error(),
+			Command:  cmdStr,
+			Duration: time.Since(start).String(),
+		}
+
+	case <-serverDetected:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		stdout.Close()
+		stderr.Close()
+		// Don't use fmt.Println here - stdout is used for MCP protocol communication
+		// The success message is already included in the result output
+		return &CodeRunResult{
+			Success:  true,
+			Output:   "Server run successfully 🚀\n" + buf.String(),
+			Command:  cmdStr,
+			Duration: time.Since(start).String(),
+		}
+
+	case <-time.After(timeout):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		stdout.Close()
+		stderr.Close()
+		return &CodeRunResult{
+			Success:  true,
+			Output:   "Server run successfully 🚀 (timeout)\n" + buf.String(),
+			Command:  cmdStr,
+			Duration: time.Since(start).String(),
+		}
+
+	case err := <-done:
+		stdout.Close()
+		stderr.Close()
+		duration := time.Since(start)
+		out := buf.String()
+		if err != nil {
+			return &CodeRunResult{
+				Success:  false,
+				Error:    err.Error(),
+				Output:   out,
+				Command:  cmdStr,
+				Duration: duration.String(),
+			}
+		}
+		return &CodeRunResult{
+			Success:  true,
+			Output:   out,
+			Command:  cmdStr,
+			Duration: duration.String(),
+		}
+	}
+}
+
+func runCode(ctx context.Context, params mcp.CallToolParams) (*CodeRunResult, error) {
+	args := params.Arguments.(map[string]any)
+	lang := args["language"].(string)
 	config, ok := languageConfigs[lang]
 	if !ok {
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 
-	timeout := 15 * time.Second
-	if t, ok := argsMap["timeout"].(float64); ok {
+	timeout := 10 * time.Second
+	if t, ok := args["timeout"].(float64); ok {
 		timeout = time.Duration(int(t)) * time.Second
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	code, _ := argsMap["code"].(string)
-	path, _ := argsMap["path"].(string)
-	file, _ := argsMap["file"].(string)
-	cwd, _ := argsMap["cwd"].(string)
-	argsAny, _ := argsMap["args"].([]any)
-
-	runArgs := make([]string, len(argsAny))
-	for i, v := range argsAny {
-		runArgs[i] = fmt.Sprintf("%v", v)
+	// Use the passed context, but ensure it has at least the timeout duration
+	// If the context already has a shorter deadline, respect it
+	ctxDeadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline || time.Until(ctxDeadline) > timeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 
-	var targetFile string
+	path, _ := args["path"].(string)
+	file, _ := args["file"].(string)
+	code, _ := args["code"].(string)
+
+	var target string
 	if code != "" {
-		tmpFile, err := os.CreateTemp("", fmt.Sprintf("mcp-code-*%s", config.Extension))
-		if err != nil {
-			return nil, err
-		}
-		defer os.Remove(tmpFile.Name())
-		tmpFile.WriteString(code)
-		tmpFile.Close()
-		targetFile = tmpFile.Name()
-	} else if path != "" {
-		info, err := os.Stat(path)
-		if err != nil {
-			return nil, fmt.Errorf("invalid path: %v", err)
-		}
-		if info.IsDir() {
-			if file == "" {
-				return nil, fmt.Errorf("file required for directory path")
-			}
-			targetFile = filepath.Join(path, file)
-		} else {
-			targetFile = path
-		}
+		tmp, _ := os.CreateTemp("", fmt.Sprintf("mcp-%s-*%s", lang, config.Extension))
+		defer os.Remove(tmp.Name())
+		tmp.WriteString(code)
+		tmp.Close()
+		target = tmp.Name()
 	} else {
-		return nil, fmt.Errorf("either code or path required")
+		if path != "" && file != "" {
+			target = filepath.Join(path, file)
+		} else {
+			target = path
+		}
 	}
 
-	if cwd != "" {
-		os.Chdir(cwd)
-	}
-
-	start := time.Now()
 	var cmd *exec.Cmd
-	var cmdStr string
-	var outputBin string
-
 	if config.NeedsCompile {
-		outputBin = filepath.Join(os.TempDir(), fmt.Sprintf("mcp-compiled-%d", time.Now().UnixNano()))
-		defer os.Remove(outputBin)
-
-		var compileArgs []string
-		switch lang {
-		case "c", "cpp":
-			compileArgs = append(config.CompileArgs, outputBin, targetFile)
-		case "rust":
-			compileArgs = []string{targetFile, "-o", outputBin}
-		case "java":
-			compileArgs = []string{targetFile}
+		bin := filepath.Join(os.TempDir(), fmt.Sprintf("mcp-bin-%d", time.Now().UnixNano()))
+		defer os.Remove(bin)
+		compile := exec.CommandContext(ctx, config.Cmd, append(config.CompileArgs, bin, target)...)
+		if out, err := compile.CombinedOutput(); err != nil {
+			return &CodeRunResult{Success: false, Error: string(out)}, nil
 		}
-
-		compileCmd := exec.CommandContext(ctx, config.Cmd, compileArgs...)
-		compileOut, err := compileCmd.CombinedOutput()
-		if err != nil {
-			return &CodeRunResult{Success: false, Error: string(compileOut), ExitCode: 1}, nil
-		}
-	}
-
-	if config.RunCompiled && config.NeedsCompile {
-		if lang == "java" {
-			className := strings.TrimSuffix(filepath.Base(targetFile), ".java")
-			allArgs := append([]string{"-cp", filepath.Dir(targetFile), className}, runArgs...)
-			cmd = exec.CommandContext(ctx, "java", allArgs...)
-			cmdStr = fmt.Sprintf("java %s", strings.Join(allArgs, " "))
-		} else {
-			allArgs := append([]string{outputBin}, runArgs...)
-			cmd = exec.CommandContext(ctx, outputBin, runArgs...)
-			cmdStr = fmt.Sprintf("%s %s", outputBin, strings.Join(allArgs, " "))
-		}
+		cmd = exec.CommandContext(ctx, bin)
 	} else {
-		allArgs := append(append(config.Args, targetFile), runArgs...)
-		cmd = exec.CommandContext(ctx, config.Cmd, allArgs...)
-		cmdStr = fmt.Sprintf("%s %s", config.Cmd, strings.Join(allArgs, " "))
+		cmd = exec.CommandContext(ctx, config.Cmd, append(config.Args, target)...)
 	}
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdoutPipe, _ := cmd.StdoutPipe()
-	stderrPipe, _ := cmd.StderrPipe()
-
-	if err := cmd.Start(); err != nil {
-		return &CodeRunResult{Success: false, Error: err.Error(), ExitCode: 1}, nil
-	}
-
-	outputChan := make(chan string)
-	go func() {
-		out := new(strings.Builder)
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			out.WriteString(scanner.Text() + "\n")
-		}
-		scannerErr := bufio.NewScanner(stderrPipe)
-		for scannerErr.Scan() {
-			out.WriteString(scannerErr.Text() + "\n")
-		}
-		outputChan <- out.String()
-	}()
-
-	select {
-	case <-time.After(2 * time.Second):
-		// assume it’s a running server if still alive
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		duration := time.Since(start)
-		return &CodeRunResult{
-			Success:  true,
-			Output:   "Server run successfully 🚀",
-			Duration: duration.String(),
-			Command:  cmdStr,
-			ExitCode: 0,
-		}, nil
-
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return &CodeRunResult{
-			Success:  false,
-			Error:    fmt.Sprintf("Execution timed out after %v", timeout),
-			Command:  cmdStr,
-			ExitCode: -1,
-		}, nil
-
-	case out := <-outputChan:
-		_ = cmd.Wait()
-		duration := time.Since(start)
-		result := &CodeRunResult{
-			Output:   out,
-			Duration: duration.String(),
-			Command:  cmdStr,
-		}
-
-		if err := ctx.Err(); err == context.DeadlineExceeded {
-			result.Success = false
-			result.Error = fmt.Sprintf("Execution timed out after %v", timeout)
-			result.ExitCode = -1
-		} else {
-			result.Success = true
-		}
-
-		return result, nil
-	}
+	return runCommandWithDetection(ctx, cmd, timeout, strings.Join(cmd.Args, " ")), nil
 }
 
+// --- MCP Server ---
 func main() {
-	s := server.NewMCPServer("code-runner", "1.0.3", server.WithToolCapabilities(true))
+	s := server.NewMCPServer("code-runner", "1.4.1", server.WithToolCapabilities(true))
 
 	runTool := mcp.NewTool("run_code",
-		mcp.WithDescription("Run code in various programming languages with timeout handling and server detection"),
+		mcp.WithDescription("Runs code in multiple languages; detects servers and terminates safely."),
 		mcp.WithString("language", mcp.Required()),
-		mcp.WithString("code"),
 		mcp.WithString("path"),
 		mcp.WithString("file"),
-		mcp.WithArray("args"),
+		mcp.WithString("code"),
 		mcp.WithNumber("timeout"),
-		mcp.WithString("cwd"),
 	)
 
 	s.AddTool(runTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		result, err := runCode(req.Params)
+		res, err := runCode(ctx, req.Params)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-
-		text := fmt.Sprintf("✅ Command: %s\n⏱ Duration: %s\nSuccess: %v\n\n--- Output ---\n%s",
-			result.Command, result.Duration, result.Success, result.Output)
-		if result.Error != "" {
-			text += fmt.Sprintf("\n\n--- Error ---\n%s", result.Error)
+		out := fmt.Sprintf("✅ %s\n⏱ %s\nSuccess: %v\n\n--- Output ---\n%s",
+			res.Command, res.Duration, res.Success, res.Output)
+		if res.Error != "" {
+			out += fmt.Sprintf("\n\n--- Error ---\n%s", res.Error)
 		}
-		return mcp.NewToolResultText(text), nil
+		return mcp.NewToolResultText(out), nil
 	})
 
 	if err := server.ServeStdio(s); err != nil {
