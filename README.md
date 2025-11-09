@@ -20,6 +20,12 @@ To build the `lattice-code` CLI from source:
 
 ```bash
 # Clone the repository
+git clone https://github.com/Raezil/code-runner-mcp.git
+cd lattice-code
+chnod +x install.sh
+./install.sh
+
+# Build mcp
 git clone https://github.com/Protocol-Lattice/lattice-code.git
 cd lattice-code
 

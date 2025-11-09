@@ -35,14 +35,6 @@ go build -o lattice-code ./cmd || { echo -e "${RED}❌ Failed to build lattice-c
 echo -e "${BLUE}→ Moving binary to /usr/local/bin...${RESET}"
 sudo mv lattice-code /usr/local/bin/ || { echo -e "${RED}❌ Failed to move lattice-code.${RESET}"; exit 1; }
 
-# ──────────────────────────────────────────────
-# Build lattice-code-runner
-# ──────────────────────────────────────────────
-echo -e "${YELLOW}→ Building lattice-code-runner from ./cmd/mcp...${RESET}"
-go build -o lattice-code-runner ./cmd/mcp/main.go || { echo -e "${RED}❌ Failed to build lattice-code-runner.${RESET}"; exit 1; }
-
-echo -e "${BLUE}→ Moving binary to /usr/local/bin...${RESET}"
-sudo mv lattice-code-runner /usr/local/bin/ || { echo -e "${RED}❌ Failed to move lattice-code-runner.${RESET}"; exit 1; }
 
 # ──────────────────────────────────────────────
 # Move provider.json
