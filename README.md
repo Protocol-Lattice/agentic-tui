@@ -19,7 +19,7 @@ It is built on top of the Lattice Go Agent Framework.
 To build the `lattice-code` CLI from source:
 
 ```bash
-# Clone the repository
+# Clone the mcp repository
 git clone https://github.com/Raezil/code-runner-mcp.git
 cd lattice-code
 chnod +x install.sh
