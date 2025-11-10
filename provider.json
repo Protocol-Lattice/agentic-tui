@@ -1,10 +1,10 @@
 {
   "providers": [
     {
-      "name": "code_tools",
+      "name": "codebase",
       "provider_type": "mcp",
-      "command": ["lattice-code-runner"],
-      "args": [],
+      "command": ["/usr/local/bin/codebase-mcp"],
+      "args": ["-transport", "stdio"],
       "env": {}
     }
   ]

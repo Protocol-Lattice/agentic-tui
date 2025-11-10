@@ -32,8 +32,16 @@ sleep 0.5
 echo -e "${YELLOW}→ Building lattice-code from ./cmd...${RESET}"
 go build -o lattice-code ./cmd || { echo -e "${RED}❌ Failed to build lattice-code.${RESET}"; exit 1; }
 
-echo -e "${BLUE}→ Moving binary to /usr/local/bin...${RESET}"
+echo -e "${YELLOW}→ Building codebase-mcp server...${RESET}"
+go build -o codebase-mcp ./codebase-mcp || { echo -e "${RED}❌ Failed to build codebase-mcp.${RESET}"; exit 1; }
+
+echo -e "${YELLOW}→ Building memory-bank-mcp server...${RESET}"
+go build -o memory-bank-mcp ./memory-bank-mcp || { echo -e "${RED}❌ Failed to build memory-bank-mcp.${RESET}"; exit 1; }
+
+echo -e "${BLUE}→ Moving binaries to /usr/local/bin...${RESET}"
 sudo mv lattice-code /usr/local/bin/ || { echo -e "${RED}❌ Failed to move lattice-code.${RESET}"; exit 1; }
+sudo mv codebase-mcp /usr/local/bin/ || { echo -e "${RED}❌ Failed to move codebase-mcp.${RESET}"; exit 1; }
+sudo mv memory-bank-mcp /usr/local/bin/ || { echo -e "${RED}❌ Failed to move memory-bank-mcp.${RESET}"; exit 1; }
 
 
 # ──────────────────────────────────────────────
