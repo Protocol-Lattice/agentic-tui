@@ -3,7 +3,7 @@ module github.com/Protocol-Lattice/lattice-code
 go 1.25.0
 
 require (
-	github.com/Protocol-Lattice/go-agent v0.6.4
+	github.com/Protocol-Lattice/go-agent v0.7.3
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -18,6 +18,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.5.7 // indirect
+	github.com/alpkeskin/gotoon v0.1.1 // indirect
 	github.com/anthropics/anthropic-sdk-go v1.13.0 // indirect
 	github.com/anush008/fastembed-go v1.0.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
