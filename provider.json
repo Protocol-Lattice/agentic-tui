@@ -1,9 +1,11 @@
 {
   "providers": [
     {
-      "name": "code_tools",
+      "name": "lattice_mcp_codebase",
       "provider_type": "mcp",
-      "command": ["lattice-code-runner"],
+      "command": [
+        "./lattice-mcp-server"
+      ],
       "args": [],
       "env": {}
     }

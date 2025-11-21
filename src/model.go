@@ -14,27 +14,12 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	agent "github.com/Protocol-Lattice/go-agent"
+	"github.com/Protocol-Lattice/lattice-code/src/ui"
 )
 
-type mode int
-
-const (
-	modeDir mode = iota
-	modeList
-	modePrompt
-	modeThinking
-	modeChat
-	modeResult
-	modeUTCP
-	modeUTCPArgs
-	modeStepBuild
-	modeRefactor
-	modeSession
-	modeSwarm
-)
+// Mode aliases are removed in favor of ui.Mode
 
 const logo = `
 ██╗      █████╗ ████████╗████████╗██╗ ██████╗███████╗
@@ -91,8 +76,8 @@ type model struct {
 	agent      *agent.Agent
 	working    string
 	history    []string
-	mode       mode
-	prevMode   mode
+	mode       ui.Mode
+	prevMode   ui.Mode
 	selected   plugin
 	isThinking bool
 	list       list.Model
@@ -104,7 +89,7 @@ type model struct {
 	output     string
 	width      int
 	height     int
-	style      styles
+	style      ui.Styles
 
 	Program *tea.Program
 	mu      sync.Mutex
@@ -120,27 +105,6 @@ type model struct {
 	lockDir           string
 	plannerQueue      chan string // new: queued logs for planner output
 
-}
-
-type styles struct {
-	header        lipgloss.Style
-	subtitle      lipgloss.Style
-	list          lipgloss.Style
-	listHeader    lipgloss.Style
-	listItem      lipgloss.Style
-	listSelected  lipgloss.Style
-	textarea      lipgloss.Style
-	help          lipgloss.Style
-	footer        lipgloss.Style
-	accent        lipgloss.Style
-	error         lipgloss.Style
-	success       lipgloss.Style
-	thinking      lipgloss.Style
-	status        lipgloss.Style
-	statusRight   lipgloss.Style
-	chatContainer lipgloss.Style
-	subtle        lipgloss.Style
-	center        lipgloss.Style
 }
 
 func NewModel(ctx context.Context, a *agent.Agent, startDir string) *model {
@@ -163,14 +127,16 @@ func NewModel(ctx context.Context, a *agent.Agent, startDir string) *model {
 	ta.Focus()
 	ta.SetHeight(3)
 
-	st := newStyles()
+	ta.SetHeight(3)
+
+	st := ui.NewStyles()
 
 	vp := viewport.New(0, 0)
 	vp.SetContent("Welcome to Lattice Code! Describe your task to get started.\n")
 
 	s := spinner.New()
 	s.Spinner = spinner.Line
-	s.Style = st.thinking
+	s.Style = st.Thinking
 
 	// Generate a random session ID for this run.
 	randBytes := make([]byte, 4)
@@ -182,7 +148,7 @@ func NewModel(ctx context.Context, a *agent.Agent, startDir string) *model {
 		agent:        a,
 		working:      startDir,
 		history:      []string{startDir},
-		mode:         modeDir,
+		mode:         ui.ModeDir,
 		list:         l,
 		dirlist:      dirList,
 		textarea:     ta,
@@ -216,80 +182,6 @@ func (m *model) persistTranscript() {
 		return
 	}
 	m.lastTranscriptSig = hashString(m.output)
-}
-
-func newStyles() styles {
-	return styles{
-		header: lipgloss.NewStyle(). // Less prominent header
-						Foreground(lipgloss.Color("#555")).
-						Faint(true).
-						Padding(0, 1),
-
-		subtitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#999999")).
-			Padding(0, 1),
-
-		list: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#AD8CFF")),
-
-		listHeader: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#AD8CFF")).
-			Bold(true).
-			Padding(0, 1),
-
-		listItem: lipgloss.NewStyle().
-			Padding(0, 1),
-
-		listSelected: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#00E6B8")).
-			Bold(true),
-
-		textarea: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#AD8CFF")),
-
-		help: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#777777")),
-
-		footer: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#777777")).
-			Faint(true),
-
-		accent: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#AD8CFF")),
-
-		error: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF5C5C")).
-			Bold(true),
-
-		success: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3DDC97")).
-			Bold(true),
-
-		thinking: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3DDC97")), // Changed to green
-
-		status: lipgloss.NewStyle().
-			Background(lipgloss.Color("#AD8CFF")).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Padding(0, 1),
-
-		statusRight: lipgloss.NewStyle().
-			Inherit(lipgloss.NewStyle().
-				Background(lipgloss.Color("#AD8CFF")).
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Padding(0, 1)).Align(lipgloss.Right),
-
-		chatContainer: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#AD8CFF")).Padding(0, 1),
-
-		subtle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#999999")),
-
-		center: lipgloss.NewStyle().
-			Align(lipgloss.Center),
-	}
 }
 
 func defaultAgents() []list.Item {

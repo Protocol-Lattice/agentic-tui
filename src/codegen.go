@@ -25,52 +25,6 @@ type CodeFence struct {
 	Code string
 }
 
-// parseFences scans s and returns (lang, code) fences in source order.
-// It accepts ```<lang>\n...\n``` and ```\n...\n``` (no lang).
-func parseFences(s string) []CodeFence {
-	var out []CodeFence
-
-	i := 0
-	for {
-		// Find start of code fence
-		start := strings.Index(s[i:], "```")
-		if start == -1 {
-			break
-		}
-		start += i
-		langLineStart := start + 3
-
-		// Find end of language line
-		nl := strings.IndexByte(s[langLineStart:], '\n')
-		if nl == -1 {
-			break // malformed fence - no newline after opening
-		}
-		nl += langLineStart
-
-		// Extract language identifier
-		lang := strings.TrimSpace(s[langLineStart:nl])
-
-		// Find closing ```
-		end := strings.Index(s[nl+1:], "```")
-		if end == -1 {
-			break // malformed fence - no closing marker
-		}
-		end += nl + 1
-
-		// Extract code content
-		code := s[nl+1 : end]
-
-		out = append(out, CodeFence{
-			Lang: lang,
-			Code: code,
-		})
-
-		// Move past this fence
-		i = end + 3
-	}
-	return out
-}
-
 // extFromLang maps language identifiers to file extensions
 func extFromLang(lang string) string {
 	lang = strings.ToLower(strings.TrimSpace(lang))

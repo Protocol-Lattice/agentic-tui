@@ -13,7 +13,8 @@ import (
 
 	"github.com/Protocol-Lattice/go-agent/src/models"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Protocol-Lattice/lattice-code/src/ui"
 )
 
 // codegenStatusMsg is sent from the locking mechanism to update the UI.
@@ -54,10 +55,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.WindowSizeMsg:
-		headerHeight := lipgloss.Height(m.viewHeader())
-		footerHeight := lipgloss.Height(m.viewFooter())
-		chatContainerVPadding := m.style.chatContainer.GetVerticalPadding()
-		chatContainerHPadding := m.style.chatContainer.GetHorizontalPadding()
+		// Calculate header height: logo (7 lines) + subtitle (1 line) + padding
+		headerHeight := 8
+		// Footer is a single line with padding
+		footerHeight := 2
+		chatContainerVPadding := m.style.ChatContainer.GetVerticalPadding()
+		chatContainerHPadding := m.style.ChatContainer.GetHorizontalPadding()
 		m.width, m.height = msg.Width, msg.Height
 		m.list.SetSize(m.width-chatContainerHPadding-2, m.height-headerHeight-footerHeight-chatContainerVPadding-2)
 		m.dirlist.SetSize(m.width, m.height-headerHeight-footerHeight-2)                                             // No container padding
@@ -73,12 +76,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "ctrl+d": // New: shortcut to change directory
-			m.mode = modeDir
+			m.mode = ui.ModeDir
 			return m, nil
 
 		case "ctrl+s": // New: set session ID
 			m.prevMode = m.mode
-			m.mode = modeSession
+			m.mode = ui.ModeSession
 			m.textarea.Placeholder = "Enter new session ID..."
 			m.textarea.SetValue(m.sessionID)
 			m.textarea.Focus()
@@ -86,14 +89,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+w": // New: set sWarm spaces
 			m.prevMode = m.mode
-			m.mode = modeSwarm
+			m.mode = ui.ModeSwarm
 			m.textarea.Placeholder = "Enter shared spaces (comma-separated)..."
 			m.textarea.SetValue(strings.Join(m.sharedSpaces, ", "))
 			m.textarea.Focus()
 			return m, nil
 
 		case "left":
-			if m.mode == modeDir {
+			if m.mode == ui.ModeDir {
 				parent := filepath.Dir(m.working)
 				if parent != m.working { // This check is sufficient and correct
 					m.working = parent
@@ -103,28 +106,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.mode == modeUTCPArgs {
-				m.mode = modeUTCP
+			if m.mode == ui.ModeUTCPArgs {
+				m.mode = ui.ModeUTCP
 				return m, nil
 			}
-			if m.mode == modeUTCP {
-				m.mode = modeList
+			if m.mode == ui.ModeUTCP {
+				m.mode = ui.ModeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 				return m, nil
 			}
-			if m.mode == modeResult {
+			if m.mode == ui.ModeResult {
 				switch m.prevMode {
 				default:
-					m.mode = modeList
+					m.mode = ui.ModeList
 					m.list.Title = "Agents"
 					m.list.SetItems(defaultAgents())
 				}
 				m.textarea.Reset()
 				return m, nil
 			}
-			if m.mode == modePrompt || m.mode == modeChat {
-				m.mode = modeChat
+			if m.mode == ui.ModePrompt || m.mode == ui.ModeChat {
+				m.mode = ui.ModeChat
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
@@ -133,13 +136,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "esc":
 			switch m.mode {
-			case modePrompt, modeResult, modeUTCPArgs, modeChat, modeSession, modeSwarm:
-				m.mode = modeList
+			case ui.ModePrompt, ui.ModeResult, ui.ModeUTCPArgs, ui.ModeChat, ui.ModeSession, ui.ModeSwarm:
+				m.mode = ui.ModeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 				m.textarea.Reset()
-			case modeUTCP:
-				m.mode = modeList
+			case ui.ModeUTCP:
+				m.mode = ui.ModeList
 				m.list.Title = "Agents"
 				m.list.SetItems(defaultAgents())
 			}
@@ -148,17 +151,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.mode {
 
-			case modeList:
+			case ui.ModeList:
 				if i, ok := m.list.SelectedItem().(plugin); ok {
 					m.selected = i
 					m.prevMode = m.mode
-					m.mode = modeChat
+					m.mode = ui.ModeChat
 					m.refreshContext() // Refresh context on agent selection
 					m.textarea.Focus()
 				}
 				return m, nil
 
-			case modeDir:
+			case ui.ModeDir:
 				item, ok := m.dirlist.SelectedItem().(dirItem)
 				if !ok {
 					return m, nil
@@ -166,7 +169,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				// --- Confirm current directory ---
 				if strings.HasPrefix(item.name, "✅") {
-					m.mode = modeChat // Go to chat after selecting dir
+					m.mode = ui.ModeChat // Go to chat after selecting dir
 					m.list.Title = fmt.Sprintf("📁 %s", filepath.Base(m.working))
 					m.list.SetItems(defaultAgents())
 					m.refreshContext() // Refresh context after confirming directory
@@ -195,14 +198,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-			case modePrompt:
+			case ui.ModePrompt:
 				raw := strings.TrimSpace(m.textarea.Value())
 				if raw == "" {
 					return m, nil
 				}
 				return m.runPrompt(raw)
 
-			case modeChat:
+			case ui.ModeChat:
 				raw := strings.TrimSpace(m.textarea.Value())
 				if raw == "" {
 					return m, nil
@@ -210,7 +213,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				// Reset textarea and show user input
 				m.textarea.Reset()
-				m.output += m.style.accent.Render("You: ") + raw + "\n\n"
+				m.output += m.style.Accent.Render("You: ") + raw + "\n\n"
 				m.renderOutput(true)
 
 				// 🧠 Always set thinking state on every new prompt
@@ -222,7 +225,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.HasPrefix(raw, "@utcp ") {
 					jsonStr := strings.TrimSpace(strings.TrimPrefix(raw, "@utcp "))
 					if jsonStr == "" {
-						m.output += m.style.error.Render("❌ UTCP call requires a JSON payload.\n")
+						m.output += m.style.Error.Render("❌ UTCP call requires a JSON payload.\n")
 						m.renderOutput(true)
 						return m, nil
 					}
@@ -234,13 +237,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 
 					if err := json.Unmarshal([]byte(jsonStr), &payload); err != nil {
-						m.output += m.style.error.Render(fmt.Sprintf("❌ Invalid JSON for UTCP call: %v\n", err))
+						m.output += m.style.Error.Render(fmt.Sprintf("❌ Invalid JSON for UTCP call: %v\n", err))
 						m.renderOutput(true)
 						return m, nil
 					}
 
 					if payload.Tool == "" {
-						m.output += m.style.error.Render("❌ UTCP JSON payload must include a 'tool' name.\n")
+						m.output += m.style.Error.Render("❌ UTCP JSON payload must include a 'tool' name.\n")
 						m.renderOutput(true)
 						return m, nil
 					}
@@ -264,17 +267,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.spinner.Tick,
 				)
 
-			case modeSession:
+			case ui.ModeSession:
 				newID := strings.TrimSpace(m.textarea.Value())
 				if newID != "" {
 					m.sessionID = newID
 				}
-				m.mode = modeChat
+				m.mode = ui.ModeChat
 				m.textarea.Reset()
 				m.textarea.Placeholder = "Describe your task or goal..."
 				return m, nil
 
-			case modeSwarm:
+			case ui.ModeSwarm:
 				spacesStr := strings.TrimSpace(m.textarea.Value())
 				if spacesStr == "" {
 					m.sharedSpaces = nil
@@ -283,7 +286,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return c == ',' || unicode.IsSpace(c)
 					})
 				}
-				m.mode = modeChat
+				m.mode = ui.ModeChat
 				m.textarea.Reset()
 				m.textarea.Placeholder = "Describe your task or goal..."
 				return m, nil
@@ -293,7 +296,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case generateMsg:
 		m.isThinking = false
 		if msg.err != nil {
-			m.output += m.style.error.Render(fmt.Sprintf("❌ %v\n", msg.err))
+			m.output += m.style.Error.Render(fmt.Sprintf("❌ %v\n", msg.err))
 		} else {
 			m.output += msg.text
 			if msg.text != "" && !strings.HasSuffix(msg.text, "\n") {
@@ -344,9 +347,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case codegenStatusMsg:
 		if msg.err != nil {
-			m.output += m.style.error.Render(fmt.Sprintf("❌ %v\n", msg.err))
+			m.output += m.style.Error.Render(fmt.Sprintf("❌ %v\n", msg.err))
 		} else if msg.msg != "" {
-			m.output += m.style.subtle.Render(msg.msg + "\n")
+			m.output += m.style.Subtle.Render(msg.msg + "\n")
 		}
 		m.renderOutput(true)
 		// This is a status update, so we don't need to return a command.
@@ -357,11 +360,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var newCmd tea.Cmd // Use a new variable for commands from the switch
 	switch m.mode {
-	case modeDir:
+	case ui.ModeDir:
 		m.dirlist, newCmd = m.dirlist.Update(msg)
-	case modeList, modeUTCP:
+	case ui.ModeList, ui.ModeUTCP:
 		m.list, newCmd = m.list.Update(msg)
-	case modePrompt, modeUTCPArgs, modeChat, modeSession, modeSwarm:
+	case ui.ModePrompt, ui.ModeUTCPArgs, ui.ModeChat, ui.ModeSession, ui.ModeSwarm:
 		var textareaCmd, viewportCmd tea.Cmd
 		m.textarea, textareaCmd = m.textarea.Update(msg)
 		m.viewport, viewportCmd = m.viewport.Update(msg)
@@ -391,14 +394,14 @@ func (m *model) callUTCPStream(toolName string, args map[string]any) tea.Msg {
 		return generateMsg{"", err}
 	}
 	var out strings.Builder
-	out.WriteString(m.style.accent.Render(fmt.Sprintf("UTCP Stream (%s):", toolName)) + "\n")
+	out.WriteString(m.style.Accent.Render(fmt.Sprintf("UTCP Stream (%s):", toolName)) + "\n")
 	for {
 		item, err := stream.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			out.WriteString("\n" + m.style.error.Render(fmt.Sprintf("❌ Stream error: %v", err)))
+			out.WriteString("\n" + m.style.Error.Render(fmt.Sprintf("❌ Stream error: %v", err)))
 			break // Stop on stream error
 		}
 		// Render each item as it arrives
@@ -414,7 +417,7 @@ func (m *model) callUTCPStream(toolName string, args map[string]any) tea.Msg {
 // path: src/update.go
 func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 	m.textarea.Reset()
-	m.output += m.style.accent.Render("You: ") + raw + "\n\n"
+	m.output += m.style.Accent.Render("You: ") + raw + "\n\n"
 	m.renderOutput(true)
 
 	m.isThinking = true
@@ -437,22 +440,22 @@ func (m *model) runPrompt(raw string) (*model, tea.Cmd) {
 		}
 
 		var out strings.Builder
-		out.WriteString(m.style.accent.Render(m.selected.name+":") + "\n\n")
+		out.WriteString(m.style.Accent.Render(m.selected.name+":") + "\n\n")
 		for _, action := range result.Actions {
 			switch action.Action {
 			case "saved":
-				out.WriteString(m.style.success.Render(fmt.Sprintf("💾 %s\n", action.Path)))
+				out.WriteString(m.style.Success.Render(fmt.Sprintf("💾 %s\n", action.Path)))
 				if strings.TrimSpace(action.Diff) != "" {
-					out.WriteString(m.style.subtle.Render("```diff") + "\n")
+					out.WriteString(m.style.Subtle.Render("```diff") + "\n")
 					out.WriteString(action.Diff)
-					out.WriteString(m.style.subtle.Render("```") + "\n")
+					out.WriteString(m.style.Subtle.Render("```") + "\n")
 				}
 			case "deleted", "removed":
-				out.WriteString(m.style.subtle.Render(fmt.Sprintf("🧹 %s %s\n", strings.Title(action.Action), action.Path)))
+				out.WriteString(m.style.Subtle.Render(fmt.Sprintf("🧹 %s %s\n", strings.Title(action.Action), action.Path)))
 			case "error":
-				out.WriteString(m.style.error.Render(fmt.Sprintf("❌ %s\n", action.Message)))
+				out.WriteString(m.style.Error.Render(fmt.Sprintf("❌ %s\n", action.Message)))
 			case "info":
-				out.WriteString(m.style.subtle.Render(fmt.Sprintf("ℹ️ %s\n", action.Message)))
+				out.WriteString(m.style.Subtle.Render(fmt.Sprintf("ℹ️ %s\n", action.Message)))
 			}
 		}
 		return generateMsg{out.String(), nil}
